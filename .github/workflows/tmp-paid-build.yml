@@ -1,0 +1,27 @@
+name: TEMP paid build and GPU validation
+# TEMPORARY (CON-1467): build.yml is not registered in this fork until it
+# reaches the default branch, so this calls it as a reusable workflow instead.
+# Runs on push of this file to the feature branch and starts BILLED Runpod Pods
+# with the production defaults (GPU builds, Community cloud, all five GPU
+# families). Delete before merging.
+# Edit this file to start a new run: pushes only trigger it when it changes.
+
+on:
+  push:
+    branches:
+      - feat/CON-1467-cu132-torch2.13
+    paths:
+      - .github/workflows/tmp-paid-build.yml
+
+permissions:
+  contents: read
+
+jobs:
+  factory:
+    uses: ./.github/workflows/build.yml
+    with:
+      source_ref: ${{ github.sha }}
+      confirm_paid_pods: true
+    secrets:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      RUNPOD_SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}
