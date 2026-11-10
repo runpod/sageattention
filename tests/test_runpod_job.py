@@ -32,6 +32,7 @@ from tools.runpod_job import (
     _make_repo_archive,
     _parser,
     _safe_extract,
+    _start_placement_round,
     run_job,
     verify_pod_assignment,
     wait_for_ssh,
@@ -1280,7 +1281,7 @@ class RunJobCleanupTests(unittest.TestCase):
         self.assertEqual(len(set(ctl.deadlines)), 1)
         self.assertGreaterEqual(ctl.deadlines[0], 600)
         sleep.assert_called_once()
-        self.assertAlmostEqual(sleep.call_args.args[0], 5.0)
+        self.assertAlmostEqual(sleep.call_args.args[0], 300.0)
         self.assertEqual(result.selected_gpu_id, first)
         self.assertEqual(ctl.terminated, ["pod-selected"])
 
@@ -1349,8 +1350,8 @@ class RunJobCleanupTests(unittest.TestCase):
             for event in events
             if event[0] == "print" and "Trying GPU candidate" in str(event[1])
         ]
-        self.assertIn("Trying GPU candidate 1/2 (round 1/2)", attempt_messages[0])
-        self.assertIn("Trying GPU candidate 2/2 (round 1/2)", attempt_messages[1])
+        self.assertIn("Trying GPU candidate 1/2 (round 1/5)", attempt_messages[0])
+        self.assertIn("Trying GPU candidate 2/2 (round 1/5)", attempt_messages[1])
 
     def test_gpu_candidate_fallback_does_not_retry_configuration_error(self) -> None:
         class FakeCtl:
@@ -1566,6 +1567,177 @@ class RunJobCleanupTests(unittest.TestCase):
             self.assertIn("Pod pod-ok: downloading requested artifacts", messages)
             self.assertIn("Pod pod-ok: artifact download complete", messages)
             self.assertIn("Pod pod-ok: terminated", messages)
+
+
+
+class PlacementRetryTests(unittest.TestCase):
+    """Capacity retries: bounded rounds, a backoff between them, fresh budgets."""
+
+    CPU_POD = {
+        "image": "registry.invalid/builder@sha256:" + "c" * 64,
+        "cpu": {"id": "cpu3g", "vcpuCount": 16, "memory": 64},
+        "disk": 80,
+    }
+
+    def _spec(self, root: Path, **overrides) -> JobSpec:
+        return replace(RunJobCleanupTests._spec(self, root), **overrides)  # type: ignore[arg-type]
+
+    @staticmethod
+    def _transport():
+        class FakeTransport:
+            def upload_repo(self, *args):
+                return None
+
+            def run_script(self, *args):
+                return None
+
+            def download_artifacts(self, *args):
+                return None
+
+        return FakeTransport()
+
+    def test_cpu_placement_retries_capacity_until_a_round_succeeds(self) -> None:
+        pod = self.CPU_POD
+
+        class FakeCtl:
+            def __init__(self):
+                self.creates = 0
+                self.terminated: list[str] = []
+
+            def check_auth(self, timeout):
+                return None
+
+            def create_pod(self, request, self_terminate_seconds, timeout):
+                self.creates += 1
+                if self.creates < 3:
+                    raise CapacityUnavailableError("no instances available")
+                return "pod-cpu"
+
+            def assignment_details(self, pod_id, timeout):
+                return pod
+
+            def terminate_pod(self, pod_id, timeout):
+                self.terminated.append(pod_id)
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch(
+            "tools.runpod_job.time.sleep"
+        ) as sleep:
+            ctl = FakeCtl()
+            result = run_job(
+                self._spec(Path(temp)),
+                ctl=ctl,  # type: ignore[arg-type]
+                transport=self._transport(),  # type: ignore[arg-type]
+                wait_fn=lambda *args, **kwargs: Endpoint("host", 2200),
+            )
+        self.assertEqual(result.pod_id, "pod-cpu")
+        self.assertEqual(ctl.creates, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [300.0, 300.0])
+        self.assertEqual(ctl.terminated, ["pod-cpu"])
+
+    def test_cpu_placement_gives_up_after_the_configured_rounds(self) -> None:
+        class FakeCtl:
+            creates = 0
+
+            def check_auth(self, timeout):
+                return None
+
+            def create_pod(self, request, self_terminate_seconds, timeout):
+                FakeCtl.creates += 1
+                raise CapacityUnavailableError(f"full #{FakeCtl.creates}")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch(
+            "tools.runpod_job.time.sleep"
+        ) as sleep:
+            with self.assertRaisesRegex(
+                JobError, r"CPU placement exhausted 3 rounds.*full #1.*full #3"
+            ):
+                run_job(
+                    self._spec(
+                        Path(temp), placement_rounds=3, placement_backoff_seconds=60
+                    ),
+                    ctl=FakeCtl(),  # type: ignore[arg-type]
+                    transport=object(),  # type: ignore[arg-type]
+                )
+        self.assertEqual(FakeCtl.creates, 3)
+        # A wait between rounds, none after the last one.
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [60, 60])
+
+    def test_gpu_placement_gives_up_after_the_configured_rounds(self) -> None:
+        class FakeCtl:
+            candidates: list[str] = []
+
+            def check_auth(self, timeout):
+                return None
+
+            def create_pod(self, request, self_terminate_seconds, timeout):
+                FakeCtl.candidates.append(request.gpu_id)
+                raise CapacityUnavailableError("no instances available")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch(
+            "tools.runpod_job.time.sleep"
+        ) as sleep:
+            spec = replace(
+                RunJobCleanupTests._gpu_spec(self, Path(temp)),  # type: ignore[arg-type]
+                placement_rounds=4,
+            )
+            with self.assertRaisesRegex(JobError, "exhausted 4 ordered rounds"):
+                run_job(
+                    spec,
+                    ctl=FakeCtl(),  # type: ignore[arg-type]
+                    transport=object(),  # type: ignore[arg-type]
+                )
+        self.assertEqual(len(FakeCtl.candidates), 4 * 2)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_non_capacity_failure_is_not_retried(self) -> None:
+        class FakeCtl:
+            creates = 0
+
+            def check_auth(self, timeout):
+                return None
+
+            def create_pod(self, request, self_terminate_seconds, timeout):
+                FakeCtl.creates += 1
+                raise CommandError("Runpod REST POST failed with HTTP 422: bad body")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch(
+            "tools.runpod_job.time.sleep"
+        ) as sleep:
+            with self.assertRaisesRegex(JobError, "HTTP 422"):
+                run_job(
+                    self._spec(Path(temp)),
+                    ctl=FakeCtl(),  # type: ignore[arg-type]
+                    transport=object(),  # type: ignore[arg-type]
+                )
+        self.assertEqual(FakeCtl.creates, 1)
+        sleep.assert_not_called()
+
+    def test_each_round_gets_a_fresh_hard_budget_after_its_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            spec = self._spec(Path(temp), hard_timeout_seconds=900)
+            with mock.patch("tools.runpod_job.time.sleep") as sleep:
+                first = _start_placement_round(spec, 1, "GPU")
+                second = _start_placement_round(spec, 2, "GPU")
+        sleep.assert_called_once_with(300.0)
+        self.assertIsNot(first, second)
+        # The wait is not charged to the budget the next round works with.
+        self.assertGreater(second.seconds_left(), 899)
+
+    def test_retry_policy_is_bounded_and_exposed_by_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            for overrides, message in (
+                ({"placement_rounds": 0}, "between 1 and 10"),
+                ({"placement_rounds": 11}, "between 1 and 10"),
+                ({"placement_backoff_seconds": -1}, "between 0 and 900"),
+                ({"placement_backoff_seconds": 901}, "between 0 and 900"),
+            ):
+                with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                    ValueError, message
+                ):
+                    self._spec(Path(temp), **overrides).validate()
+        parser = _parser()
+        self.assertEqual(parser.get_default("placement_rounds"), 5)
+        self.assertEqual(parser.get_default("placement_backoff_seconds"), 300.0)
 
 
 if __name__ == "__main__":

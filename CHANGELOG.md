@@ -12,6 +12,10 @@
   read/write. GPU builds pass their vCPU and RAM minimums as placement filters,
   and builder Pods arm the in-Pod self-delete watchdog, which now calls REST v2
   directly, because v2 has no platform-side termination deadline.
+- Retry placement when every candidate lacks capacity: up to 5 rounds with a
+  300-second wait between them (`--placement-rounds`,
+  `--placement-backoff-seconds`), for CPU and GPU Pods. The wait does not count
+  against the job's hard timeout; the GitHub job timeouts grow to cover it.
 - Send an explicit User-Agent on Runpod REST calls; Cloudflare rejects the
   default `Python-urllib` agent with 403 "error code: 1010".
 - Allow targeting a non-production Runpod API through the `RUNPOD_API_URL`

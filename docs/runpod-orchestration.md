@@ -126,10 +126,14 @@ Max-Q Workstation Edition are intentionally absent from these defaults.
 L40S remains in the reviewed SM 8.9 allowlist for an explicit operator override,
 but is excluded from routine release defaults after observed assignment hangs.
 
-Fallback is deliberately narrow. The orchestrator makes at most two ordered
-placement rounds, with a five-second backoff before round two only when every
-create in round one returned Runpod's explicit no-capacity response. A
-pre-upload assignment mismatch is deleted before the next candidate is tried
+Fallback is deliberately narrow. The orchestrator makes up to five placement
+rounds (`--placement-rounds`, 1–10), waiting 300 seconds
+(`--placement-backoff-seconds`, 0–900) before each retry, and retries only
+when every create in the previous round was refused for capacity (REST v2
+`400` or `403`). CPU builds walk their ordered flavor list in each round the
+same way. Waiting costs nothing because no Pod exists yet, so each round
+starts the `--timeout-seconds` budget afresh; the GitHub job timeouts include
+the worst-case waits. A pre-upload assignment mismatch is deleted before the next candidate is tried
 and prevents another full round. Authentication, configuration, SSH, upload,
 build, and test failures are never treated as capacity and are not retried
 against another GPU. If deletion of a rejected Pod fails, fallback stops

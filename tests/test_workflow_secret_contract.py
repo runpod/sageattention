@@ -135,7 +135,7 @@ class WorkflowSecretContractTests(unittest.TestCase):
         )[0]
         gpu_test_job = self.build.split("  gpu-test:\n", 1)[1]
 
-        self.assertIn("timeout-minutes: 30", gpu_test_job)
+        self.assertIn("timeout-minutes: 60", gpu_test_job)
         self.assertIn("GPU_VALIDATION_TIMEOUT_SECONDS: 900", gpu_test_job)
         self.assertIn("GPU_VALIDATION_TERMINATE_GRACE_SECONDS: 300", gpu_test_job)
         self.assertIn(

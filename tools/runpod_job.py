@@ -165,6 +165,8 @@ class JobSpec:
     terminate_grace_seconds: int = 900
     poll_seconds: float = 5.0
     allow_paid_pod: bool = False
+    placement_rounds: int = 5
+    placement_backoff_seconds: float = 300.0
 
     def validate(self) -> None:
         self.pod.validate()
@@ -211,6 +213,10 @@ class JobSpec:
             raise ValueError("hard timeout must be positive")
         if self.terminate_grace_seconds < 60:
             raise ValueError("terminate grace must be at least 60 seconds")
+        if not 1 <= self.placement_rounds <= 10:
+            raise ValueError("placement rounds must be between 1 and 10")
+        if not 0 <= self.placement_backoff_seconds <= 900:
+            raise ValueError("placement backoff must be between 0 and 900 seconds")
 
 
 @dataclass(frozen=True)
@@ -1044,8 +1050,6 @@ def _terminate_strictly(ctl: RunpodApi, pod_id: str) -> Exception | None:
     return last_error
 
 
-GPU_PLACEMENT_ROUNDS = 2
-GPU_PLACEMENT_BACKOFF_SECONDS = 5.0
 RESOURCE_RECEIPT_PATH = "/run/sageattention/verified-memory-bytes-v1"
 
 
@@ -1063,6 +1067,25 @@ def _resource_receipt_prefix(assigned_memory_bytes: int) -> str:
         f"mv -f -- \"$resource_receipt\" {RESOURCE_RECEIPT_PATH}; "
         "unset resource_receipt; "
     )
+
+
+def _start_placement_round(spec: JobSpec, round_number: int, kind: str) -> Deadline:
+    """Wait out the backoff before a retry and start that round's deadline.
+
+    Runpod capacity comes and goes within minutes, and waiting for it costs
+    nothing because no Pod exists yet. The hard timeout therefore bounds the
+    work on a Pod, not the wait for one: each round starts it afresh.
+    """
+
+    if round_number > 1:
+        print(
+            f"No {kind} capacity in placement round {round_number - 1}/"
+            f"{spec.placement_rounds}; retrying in "
+            f"{spec.placement_backoff_seconds:g}s",
+            flush=True,
+        )
+        time.sleep(spec.placement_backoff_seconds)
+    return Deadline(spec.hard_timeout_seconds)
 
 
 def _gpu_candidates(spec: JobSpec) -> tuple[str, ...]:
@@ -1099,16 +1122,35 @@ def run_job(
             spec.hard_timeout_seconds + spec.terminate_grace_seconds
         )
         if spec.pod.compute_type.upper() == "CPU":
-            print(
-                "CPU placement attempt 1/1: requesting Pod "
-                f"{spec.pod.name!r}; self-delete after {self_terminate_seconds}s",
-                flush=True,
-            )
-            pod_id = ctl.create_pod(
-                spec.pod,
-                self_terminate_seconds=self_terminate_seconds,
-                timeout=deadline.timeout(120),
-            )
+            cpu_failures: list[str] = []
+            for round_number in range(1, spec.placement_rounds + 1):
+                deadline = _start_placement_round(spec, round_number, "CPU")
+                print(
+                    f"CPU placement round {round_number}/{spec.placement_rounds}: "
+                    f"requesting Pod {spec.pod.name!r}; "
+                    f"self-delete after {self_terminate_seconds}s",
+                    flush=True,
+                )
+                try:
+                    pod_id = ctl.create_pod(
+                        spec.pod,
+                        self_terminate_seconds=self_terminate_seconds,
+                        timeout=deadline.timeout(120),
+                    )
+                except CapacityUnavailableError as exc:
+                    cpu_failures.append(f"round {round_number}: {exc}")
+                    print(
+                        f"CPU placement round {round_number} has no matching capacity",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    continue
+                break
+            if pod_id is None:
+                raise JobError(
+                    f"CPU placement exhausted {spec.placement_rounds} rounds "
+                    "before upload: " + "; ".join(cpu_failures)
+                )
             print(
                 f"Created CPU Pod {pod_id}; in-Pod self-delete after "
                 f"{self_terminate_seconds}s",
@@ -1130,15 +1172,8 @@ def run_job(
         else:
             candidates = _gpu_candidates(spec)
             placement_failures: list[str] = []
-            for round_number in range(1, GPU_PLACEMENT_ROUNDS + 1):
-                if round_number > 1:
-                    backoff = deadline.timeout(GPU_PLACEMENT_BACKOFF_SECONDS)
-                    print(
-                        "All GPU candidates rejected in placement round "
-                        f"{round_number - 1}; retrying once after {backoff:g}s",
-                        flush=True,
-                    )
-                    time.sleep(backoff)
+            for round_number in range(1, spec.placement_rounds + 1):
+                deadline = _start_placement_round(spec, round_number, "GPU")
                 round_only_capacity_failures = True
                 for candidate_number, candidate in enumerate(candidates, start=1):
                     candidate_request = replace(spec.pod, gpu_id=candidate)
@@ -1146,7 +1181,7 @@ def run_job(
                     endpoint = None
                     print(
                         f"Trying GPU candidate {candidate_number}/{len(candidates)} "
-                        f"(round {round_number}/{GPU_PLACEMENT_ROUNDS}): "
+                        f"(round {round_number}/{spec.placement_rounds}): "
                         f"requesting exact gpuId {candidate!r}",
                         flush=True,
                     )
@@ -1224,7 +1259,8 @@ def run_job(
             if selected_gpu_id is None:
                 detail = "; ".join(placement_failures)
                 raise JobError(
-                    "GPU placement exhausted two ordered rounds before upload"
+                    f"GPU placement exhausted {spec.placement_rounds} ordered "
+                    "rounds before upload"
                     + (f": {detail}" if detail else "")
                 )
 
@@ -1432,6 +1468,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--terminate-grace-seconds", type=int, default=900)
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument(
+        "--placement-rounds",
+        type=int,
+        default=5,
+        help="placement attempts when every candidate lacks capacity (1-10)",
+    )
+    parser.add_argument(
+        "--placement-backoff-seconds",
+        type=float,
+        default=300.0,
+        help="wait between placement rounds; not counted in --timeout-seconds",
+    )
+    parser.add_argument(
         "--allow-paid-pod",
         action="store_true",
         help="mandatory acknowledgement; approved workflows only",
@@ -1494,6 +1542,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             terminate_grace_seconds=args.terminate_grace_seconds,
             poll_seconds=args.poll_seconds,
             allow_paid_pod=args.allow_paid_pod,
+            placement_rounds=args.placement_rounds,
+            placement_backoff_seconds=args.placement_backoff_seconds,
         )
         result = run_job(spec)
     except (JobError, OSError, ValueError) as exc:

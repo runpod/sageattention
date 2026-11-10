@@ -527,7 +527,9 @@ jobs:
     needs: plan
     runs-on: ubuntu-24.04
     environment: runpod-paid
-    timeout-minutes: 270
+    # 240 min hard budget + up to 4 x 5 min placement backoff, which tools/runpod_job.py
+    # does not count against --timeout-seconds.
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -675,7 +677,8 @@ jobs:
     environment: runpod-paid
     # Validation only installs a finished wheel and launches the reviewed
     # runtime cases. Keep its billed Pod budget independent from compilation.
-    timeout-minutes: 30
+    # 15 min validation + 5 min grace + up to 4 x 5 min placement backoff.
+    timeout-minutes: 60
     env:
       GPU_VALIDATION_TIMEOUT_SECONDS: 900
       GPU_VALIDATION_TERMINATE_GRACE_SECONDS: 300
