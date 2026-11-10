@@ -17,8 +17,13 @@ jobs:
     with:
       source_ref: ${{ github.sha }}
       confirm_paid_pods: true
-      # Dev has none of the reviewed build GPUs; compile on a cpu3g Pod instead.
+      # Dev has none of the reviewed build GPUs; compile on a CPU Pod instead.
       build_backend: CPU
+      # Dev stock: cpu5c is the only CPU flavor with capacity (2 GB/vCPU, so
+      # 32 vCPU = 64 GB), and the RTX 4090 only has Secure-cloud capacity.
+      cpu_flavor_ids: cpu5c
+      cpu_vcpu_count: 32
+      cloud_type: SECURE
     secrets:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       RUNPOD_SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}
