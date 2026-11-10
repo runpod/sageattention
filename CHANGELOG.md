@@ -3,7 +3,14 @@
 ## Unreleased
 
 - Add a CUDA 13.2 / PyTorch 2.13.0 variant matching the `runpod/comfyui`
-  `-cuda13.2` image. Its builder image digest must be pinned before release.
+  `-cuda13.2` image.
+- Publish the builder images as `runpod/sageattention-wheel-builder` and pin
+  their rebuilt digests.
+- Send an explicit User-Agent on direct Runpod REST calls; Cloudflare rejects
+  the default `Python-urllib` agent with 403 "error code: 1010".
+- Allow targeting a non-production Runpod API through the `RUNPOD_API_URL` and
+  `RUNPOD_GRAPHQL_URL` repository variables; unset means production.
+- Restore the executable bit on repository scripts.
 - Backport upstream SageAttention commit
   `d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4` so the SM90 fake implementation
   no longer overwrites the real eager custom-op binding, and version corrected
