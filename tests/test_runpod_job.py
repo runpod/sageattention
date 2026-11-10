@@ -117,6 +117,8 @@ class RunpodctlTests(unittest.TestCase):
         self.assertEqual(method, "POST")
         self.assertEqual(url, "https://rest.runpod.io/v1/pods")
         self.assertEqual(headers["Authorization"], "Bearer test-secret")
+        # Cloudflare answers urllib's default agent with 403 error code 1010.
+        self.assertNotIn("Python-urllib", headers.get("User-Agent", "Python-urllib"))
         self.assertEqual(payload["computeType"], "CPU")
         self.assertEqual(payload["containerDiskInGb"], 80)
         self.assertEqual(payload["volumeInGb"], 0)

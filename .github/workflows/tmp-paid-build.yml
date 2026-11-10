@@ -1,4 +1,5 @@
 name: TEMP paid build and GPU validation
+# Edit this file to start a new run: pushes only trigger it when it changes.
 
 on:
   push:

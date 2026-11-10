@@ -372,6 +372,9 @@ class Runpodctl:
         return {
             "Authorization": f"Bearer {self._api_key()}",
             "Content-Type": "application/json",
+            # Cloudflare in front of the REST API rejects urllib's default
+            # Python-urllib/x.y agent with 403 "error code: 1010".
+            "User-Agent": "runpod-sageattention-factory/1",
         }
 
     def create_pod(
