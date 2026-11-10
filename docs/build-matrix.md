@@ -6,6 +6,7 @@ This repository produces two deliberately separate SageAttention 2.2.0 wheels fo
 | --- | --- | --- | --- | --- |
 | `cp312-torch2.10.0-cu128` | CUDA 12.8 | `2.10.0+cu128` | `2.2.0+torch2.10.0.cu128.sm90fix1` | `runpod/comfyui:cuda12.8` |
 | `cp312-torch2.10.0-cu130` | CUDA 13.0 | `2.10.0+cu130` | `2.2.0+torch2.10.0.cu130.sm90fix1` | `runpod/comfyui:cuda13.0` |
+| `cp312-torch2.13.0-cu132` | CUDA 13.2 | `2.13.0+cu132` | `2.2.0+torch2.13.0.cu132.sm90fix1` | `runpod/comfyui:cuda13.2` |
 
 The table shows the human-readable ComfyUI release lines. `matrix.json` and the
 workflow defaults pin the currently reviewed OCI index digests so a mutable tag
@@ -42,10 +43,10 @@ data-center architecture.
 
 ## Builder images
 
-Build both images with:
+Build the images with:
 
 ```bash
-docker buildx bake -f docker/docker-bake.hcl builder-cu128 builder-cu130
+docker buildx bake -f docker/docker-bake.hcl builder-cu128 builder-cu130 builder-cu132
 ```
 
 The images install Ubuntu 24.04 build tools, Python 3.12 headers, CUDA compiler/runtime development packages, cuBLAS, cuSOLVER, cuSPARSE, `cuobjdump`, PyTorch, and the wheel inspection tools. The CUDA keyring package is verified against its pinned SHA-256 before installation. CUDA driver stubs are available through `LIBRARY_PATH` solely for linking the Hopper extension; they are neither placed on runtime `LD_LIBRARY_PATH` nor packaged in a wheel.

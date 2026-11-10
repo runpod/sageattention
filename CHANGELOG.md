@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a CUDA 13.2 / PyTorch 2.13.0 variant matching the `runpod/comfyui`
+  `-cuda13.2` image. Its builder image digest must be pinned before release.
 - Backport upstream SageAttention commit
   `d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4` so the SM90 fake implementation
   no longer overwrites the real eager custom-op binding, and version corrected

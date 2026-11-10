@@ -63,15 +63,16 @@ Runpod GPU-backed builder Pods.
 Authenticate to the chosen registry, then bootstrap both images:
 
 ```bash
-export IMAGE_REPOSITORY=madiatorlabs/sageattention-wheel-builder
+export IMAGE_REPOSITORY=runpod/sageattention-wheel-builder
 export IMAGE_TAG=bootstrap-$(git rev-parse --short=12 HEAD)
 
 docker buildx bake -f docker/docker-bake.hcl \
-  builder-cu128 builder-cu130 --push
+  builder-cu128 builder-cu130 builder-cu132 --push
 ```
 
-The resulting tags are `${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu128` and
-`${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu130`. Inspect each registry manifest and
+The resulting tags are `${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu128`,
+`${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu130` and
+`${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu132`. Inspect each registry manifest and
 record its digest:
 
 ```bash
@@ -79,6 +80,22 @@ docker buildx imagetools inspect \
   "${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu128"
 docker buildx imagetools inspect \
   "${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu130"
+docker buildx imagetools inspect \
+  "${IMAGE_REPOSITORY}:${IMAGE_TAG}-cu132"
+```
+
+The cu128 and cu130 builders were first published as
+`madiatorlabs/sageattention-wheel-builder`. Copying them keeps the reviewed
+digests pinned in `matrix.json` and the workflows, so they need no rebuild:
+
+```bash
+for digest in \
+  sha256:556979b41a98e5331ad38a1ae599161cb37a78cb09bec34e3f982978b84816d0 \
+  sha256:bed84f32bf76ba292728faf9fbe446d5d7f84d194444b2b6d006e663cccba906; do
+  docker buildx imagetools create \
+    --tag "runpod/sageattention-wheel-builder:${digest#sha256:}" \
+    "madiatorlabs/sageattention-wheel-builder@${digest}"
+done
 ```
 
 Pass `repository@sha256:<64 hex>` references to release workflows. Manual

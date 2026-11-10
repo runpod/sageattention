@@ -52,19 +52,26 @@ def test_exact_build_matrix_matches_comfyui_base() -> None:
     assert set(builds) == {
         "cp312-torch2.10.0-cu128",
         "cp312-torch2.10.0-cu130",
+        "cp312-torch2.13.0-cu132",
     }
     expected = {
         "cp312-torch2.10.0-cu128": (
             "12.8", "2.10.0+cu128", "12.8",
             "2.2.0+torch2.10.0.cu128.sm90fix1",
             "runpod/comfyui@sha256:ce5e842ca0c7233a983ff76a83739b445172259c77a43a117453ef7e6a64d0b7",
-            "madiatorlabs/sageattention-wheel-builder@sha256:556979b41a98e5331ad38a1ae599161cb37a78cb09bec34e3f982978b84816d0",
+            "runpod/sageattention-wheel-builder@sha256:556979b41a98e5331ad38a1ae599161cb37a78cb09bec34e3f982978b84816d0",
         ),
         "cp312-torch2.10.0-cu130": (
             "13.0", "2.10.0+cu130", "13.0",
             "2.2.0+torch2.10.0.cu130.sm90fix1",
             "runpod/comfyui@sha256:0bf75436da591e0f26d299af3741e07cb8ce8ce36566d1a7d8d78aae458e5d67",
-            "madiatorlabs/sageattention-wheel-builder@sha256:bed84f32bf76ba292728faf9fbe446d5d7f84d194444b2b6d006e663cccba906",
+            "runpod/sageattention-wheel-builder@sha256:bed84f32bf76ba292728faf9fbe446d5d7f84d194444b2b6d006e663cccba906",
+        ),
+        "cp312-torch2.13.0-cu132": (
+            "13.2", "2.13.0+cu132", "13.2",
+            "2.2.0+torch2.13.0.cu132.sm90fix1",
+            "runpod/comfyui@sha256:0d9b67c84316f70417c27b300740e35254b508234c348502261189ecbbc4024e",
+            "runpod/sageattention-wheel-builder@sha256:FILL-AFTER-PUSHING-builder-cu132",
         ),
     }
     for build_id, values in expected.items():
@@ -306,6 +313,7 @@ def test_manifest_merge_rehashes_and_rejects_ambiguity(tmp_path: Path) -> None:
     assert [entry["build_id"] for entry in merged["artifacts"]] == [
         "cp312-torch2.10.0-cu128",
         "cp312-torch2.10.0-cu130",
+        "cp312-torch2.13.0-cu132",
     ]
     with assert_raises(merger.MergeError, "Duplicate asset|runtime tuple|build ID"):
         merger.merge([paths[0], paths[0]])
@@ -387,8 +395,12 @@ def test_workflows_default_to_immutable_image_digests() -> None:
         builder_image = build["builder_image"]
         runtime_image = build["comfyui_runtime_image"]
         assert builder_image.startswith(
-            "madiatorlabs/sageattention-wheel-builder@sha256:")
+            "runpod/sageattention-wheel-builder@sha256:")
         assert runtime_image.startswith("runpod/comfyui@sha256:")
+        # The cu132 builder digest is a placeholder until builder-cu132 is
+        # pushed; keep CI red so it can't merge unpinned.
+        for image in (builder_image, runtime_image):
+            assert re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", image), image
         for image in (builder_image, runtime_image):
             assert build_workflow.count(f'default: "{image}"') == 2
             assert release_workflow.count(f'default: "{image}"') == 1
