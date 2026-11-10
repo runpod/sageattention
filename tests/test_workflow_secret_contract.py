@@ -124,8 +124,10 @@ class WorkflowSecretContractTests(unittest.TestCase):
             with self.subTest(job=job.splitlines()[0] if job else "unknown"):
                 self.assertLess(
                     job.index("- name: Verify protected Runpod credentials"),
-                    job.index("- name: Install checksum-pinned runpodctl"),
+                    job.index("python3.12 tools/runpod_job.py"),
                 )
+                # Every Runpod call goes through tools/runpod_job.py on REST v2.
+                self.assertNotIn("runpodctl", job)
 
     def test_gpu_validation_uses_a_fixed_short_budget(self) -> None:
         build_job = self.build.split("  build:\n", 1)[1].split(

@@ -6,10 +6,16 @@
   `-cuda13.2` image.
 - Publish the builder images as `runpod/sageattention-wheel-builder` and pin
   their rebuilt digests.
-- Send an explicit User-Agent on direct Runpod REST calls; Cloudflare rejects
-  the default `Python-urllib` agent with 403 "error code: 1010".
-- Allow targeting a non-production Runpod API through the `RUNPOD_API_URL` and
-  `RUNPOD_GRAPHQL_URL` repository variables; unset means production.
+- Move all Pod orchestration to the Runpod REST API v2 and drop `runpodctl`
+  from the runner and the builder image. REST v1 stops serving on November 15,
+  2026 and GraphQL in early 2027; the API key now needs only REST Pods
+  read/write. GPU builds pass their vCPU and RAM minimums as placement filters,
+  and builder Pods arm the in-Pod self-delete watchdog, which now calls REST v2
+  directly, because v2 has no platform-side termination deadline.
+- Send an explicit User-Agent on Runpod REST calls; Cloudflare rejects the
+  default `Python-urllib` agent with 403 "error code: 1010".
+- Allow targeting a non-production Runpod API through the `RUNPOD_API_URL`
+  repository variable (a REST v2 base URL); unset means production.
 - Restore the executable bit on repository scripts.
 - Backport upstream SageAttention commit
   `d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4` so the SM90 fake implementation

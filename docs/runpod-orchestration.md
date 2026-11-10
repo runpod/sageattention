@@ -37,19 +37,28 @@ disables host-key checking globally.
 The dispatch form also requires `confirm_paid_pods=true`. The orchestration
 executable has its own mandatory `--allow-paid-pod` switch. Only `build.yml`
 passes it, and those jobs are protected by `runpod-paid`.
-`ci.yml` has no Runpod secrets, no `runpodctl`, and no paid-resource switch.
+`ci.yml` has no Runpod secrets and no paid-resource switch.
 
-The default builders and all validators use GPU Pods created by the
-checksum-pinned `runpodctl` v2.3.0 command. Every GPU request carries an exact
-`gpuId`, an immutable image, an 80 GB-or-larger container disk for builders,
-and an RFC3339 `--terminate-after` deadline. The same checked client handles
-readiness and deletion.
+Every Pod is created, read and deleted by `tools/runpod_job.py` through the
+Runpod REST API v2 (`https://api.runpod.io/v2`); no CLI is installed. The API
+key therefore needs only **REST API → Pods: Read and Write**, and no GraphQL
+access. REST v1 and GraphQL are deprecated (v1 stops serving on November 15,
+2026; GraphQL in early 2027), so nothing here depends on either. Setting the
+`RUNPOD_API_URL` repository variable (for example to
+`https://api.runpod.dev/v2`) targets another environment; unset means
+production.
 
-`build_backend=CPU` remains an explicit capacity fallback. Because pinned
-`runpodctl` does not expose sized CPU creation, that path uses the official
-`POST /v1/pods` REST API with `cpuFlavorIds`, `vcpuCount`, and no persistent Pod
-volume. It is not the release default and retains the in-Pod self-delete
-watchdog because its platform termination field is not verified.
+The default builders and all validators use GPU Pods. Every GPU request carries
+an exact `gpuId`, an immutable image, the CUDA floor as `gpu.minCudaVersion`,
+and for builders an 80 GB-or-larger container disk plus `minVcpuCountPerGpu`
+and `minRamPerGpu` placement filters. REST v2 has no platform-side termination
+deadline, so builder Pods (GPU and CPU) arm the image's in-Pod self-delete
+watchdog in addition to the retried `finally` deletion. Validation Pods run the
+ComfyUI runtime image, which has no watchdog, and rely on that deletion alone.
+
+`build_backend=CPU` remains an explicit capacity fallback. It creates one
+`cpu` Pod per ordered flavor id with `vcpuCount`, and no persistent Pod volume.
+It is not the release default.
 
 ## Builder image bootstrap
 
@@ -147,13 +156,9 @@ builds do not export a selected GPU and record this field as JSON `null`.
 The same ordered values are recorded in `.env.example`. Confirm exact IDs and
 current capacity in the live available-only catalog before a paid dispatch;
 use `--include-unavailable` only to diagnose a missing type, not to claim it has
-capacity. This behavior is defined by the
-[official `runpodctl gpu` reference](https://docs.runpod.io/runpodctl/reference/runpodctl-gpu):
-
-```bash
-runpodctl gpu list -o json \
-  | jq -r '.[] | [.displayName, .gpuId] | @tsv'
-```
+capacity. List the current GPU types and their pod stock with the REST v2
+catalog (`GET /v2/catalog/gpus?include=AVAILABILITY&product=POD`, documented
+in the [REST API v2 reference](https://docs.runpod.io/api-reference-v2/overview)).
 
 The workflow does not enumerate every commercial GPU SKU. B200 (SM100) and
 B300 (SM103) are intentionally absent; NVIDIA lists them as 10.0 and 10.3
@@ -253,7 +258,7 @@ release workflow.
 
 CUDA scheduler floors come from the matching build entry in `matrix.json`:
 CUDA 12.8 for cu128 and CUDA 13.0 for cu130. GPU-backed builders and runtime
-validators both forward them as `runpodctl pod create --min-cuda-version`,
+validators both forward them as the REST v2 `gpu.minCudaVersion` field,
 preventing placement on a host whose driver cannot start the matching CUDA
 container. The build still hides the accelerator after container startup.
 

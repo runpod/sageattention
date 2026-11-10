@@ -380,9 +380,13 @@ def test_docker_bake_pins_both_toolchains() -> None:
     assert 'source "${SCRIPT_DIR}/activate-builder.sh"' in build_script
     assert build_script.index('source "${SCRIPT_DIR}/activate-builder.sh"') < (
         build_script.index("command -v"))
-    assert "RUNPODCTL_SHA256=908f2210571e8a26a1cba6fb45f09556b34dcad3e1b20dd502df2adf7a57c169" in dockerfile
+    # The self-delete watchdog calls REST v2 directly; no CLI in the image.
+    assert "runpodctl" not in dockerfile
+    assert "runpodctl" not in entrypoint
     assert "RUNPOD_SELF_TERMINATE_SECONDS" in entrypoint
-    assert 'runpodctl pod delete "$2"' in entrypoint
+    assert '-X DELETE -H @-' in entrypoint
+    assert '"$3/pods/$2"' in entrypoint
+    assert 'RUNPOD_API_URL:-https://api.runpod.io/v2' in entrypoint
     assert "RUNPOD_API_KEY" in entrypoint
 
 

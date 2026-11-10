@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run one bounded build or test job on an ephemeral Runpod Pod.
 
-The module intentionally depends only on Python's standard library and the
-``runpodctl``, ``ssh`` and ``scp`` executables.  GitHub Actions is an
+The module intentionally depends only on Python's standard library, the
+Runpod REST API v2, and the ``ssh`` and ``scp`` executables.  GitHub Actions is an
 orchestrator only: the checked-out repository is uploaded to the Pod, commands
 run there, requested artifacts are copied back, and the Pod is deleted in a
 ``finally`` path.
@@ -15,7 +15,6 @@ release workflows may.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import json
 import os
@@ -44,7 +43,7 @@ class JobTimeout(JobError):
 
 
 class CommandError(JobError):
-    """A local, SSH, or runpodctl command failed."""
+    """A local, SSH, or Runpod API operation failed."""
 
 
 class CapacityUnavailableError(CommandError):
@@ -230,7 +229,10 @@ class VerifiedBuildAssignment:
     assigned_memory_bytes: int
 
 
-DEFAULT_REST_API_URL = "https://rest.runpod.io/v1"
+DEFAULT_API_URL = "https://api.runpod.io/v2"
+# Cloudflare in front of the Runpod API rejects urllib's default
+# Python-urllib/x.y agent with 403 "error code: 1010".
+USER_AGENT = "runpod-sageattention-factory/1"
 Executor = Callable[..., subprocess.CompletedProcess[str]]
 HttpExecutor = Callable[
     [str, str, Mapping[str, object] | None, Mapping[str, str], float], object
@@ -243,9 +245,28 @@ def _completed_text(proc: subprocess.CompletedProcess[str]) -> str:
     )
 
 
-def _is_capacity_unavailable_error(error: CommandError) -> bool:
-    """Match only Runpod's explicit no-instance placement response."""
+class RestApiError(CommandError):
+    """The Runpod REST API answered with a non-2xx status."""
 
+    def __init__(self, method: str, status: int, detail: str) -> None:
+        super().__init__(
+            f"Runpod REST {method} failed with HTTP {status}: {detail}"
+        )
+        self.status = status
+        self.detail = detail
+
+
+def _is_capacity_unavailable_error(error: CommandError) -> bool:
+    """Classify a create failure as worth trying the next candidate.
+
+    REST v2 answers a GPU and data center combination it cannot place with
+    400, and a pool the account cannot use with 403; neither carries a
+    machine-readable capacity code.  A rule violation is deterministic, so when
+    every candidate fails the collected details point at the request instead.
+    """
+
+    if isinstance(error, RestApiError):
+        return error.status in {400, 403}
     normalized = " ".join(str(error).casefold().split())
     return any(
         message in normalized
@@ -284,11 +305,11 @@ def _http_json(
             raw = response.read()
     except urllib_error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise CommandError(
-            f"Runpod REST {method} failed with HTTP {exc.code}: {detail}"
-        ) from exc
+        raise RestApiError(method, exc.code, detail) from exc
     except (urllib_error.URLError, TimeoutError, OSError) as exc:
         raise CommandError(f"Runpod REST {method} failed: {exc}") from exc
+    if not raw.strip():
+        return None  # 204 No Content, e.g. a successful DELETE
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -297,69 +318,25 @@ def _http_json(
         ) from exc
 
 
-class Runpodctl:
-    """Small checked subprocess wrapper around ``runpodctl``."""
+class RunpodApi:
+    """Minimal Runpod REST v2 client for the Pod lifecycle this job needs."""
 
     def __init__(
         self,
-        binary: str = "runpodctl",
         *,
-        executor: Executor = subprocess.run,
         env: Mapping[str, str] | None = None,
         http_executor: HttpExecutor = _http_json,
-        rest_api_url: str | None = None,
+        api_url: str | None = None,
     ) -> None:
-        self.binary = binary
-        self._executor = executor
         self._env = dict(env) if env is not None else None
         self._http_executor = http_executor
-        # Same variable runpodctl reads, so both clients target one environment.
         environment = self._env if self._env is not None else os.environ
-        rest_api_url = (
-            rest_api_url
+        api_url = (
+            api_url
             or environment.get("RUNPOD_API_URL", "").strip()
-            or DEFAULT_REST_API_URL
+            or DEFAULT_API_URL
         )
-        self._rest_api_url = rest_api_url.rstrip("/")
-
-    def call(
-        self,
-        *args: str,
-        timeout: float = 60,
-        check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        argv = [self.binary, *args]
-        try:
-            proc = self._executor(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                env=self._env,
-            )
-        except FileNotFoundError as exc:
-            raise CommandError(f"{self.binary} is not installed or not on PATH") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise CommandError(
-                f"runpodctl command timed out after {timeout:.0f}s"
-            ) from exc
-        if check and proc.returncode != 0:
-            detail = _completed_text(proc) or f"exit code {proc.returncode}"
-            raise CommandError(f"runpodctl {' '.join(args[:2])} failed: {detail}")
-        return proc
-
-    def call_json(self, *args: str, timeout: float = 60) -> object:
-        proc = self.call(*args, "-o", "json", timeout=timeout)
-        try:
-            return json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise CommandError(
-                f"runpodctl returned invalid JSON: {(proc.stdout or '')[:200]}"
-            ) from exc
-
-    def check_auth(self, *, timeout: float = 30) -> None:
-        self.call("user", timeout=timeout)
+        self._api_url = api_url.rstrip("/")
 
     def _api_key(self) -> str:
         environment = self._env if self._env is not None else os.environ
@@ -368,20 +345,35 @@ class Runpodctl:
             raise CommandError("RUNPOD_API_KEY is required for the Runpod REST API")
         return api_key
 
-    def _rest_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._api_key()}",
-            "Content-Type": "application/json",
-            # Cloudflare in front of the REST API rejects urllib's default
-            # Python-urllib/x.y agent with 403 "error code: 1010".
-            "User-Agent": "runpod-sageattention-factory/1",
-        }
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, object] | None = None,
+        *,
+        timeout: float,
+    ) -> object:
+        return self._http_executor(
+            method,
+            f"{self._api_url}{path}",
+            payload,
+            {
+                "Authorization": f"Bearer {self._api_key()}",
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+            timeout,
+        )
+
+    def check_auth(self, *, timeout: float = 30) -> None:
+        """Fail before any create when the key cannot read Pods."""
+
+        self._request("GET", "/pods?limit=1", timeout=timeout)
 
     def create_pod(
         self,
         request: PodRequest,
         *,
-        terminate_after: str,
         self_terminate_seconds: int,
         timeout: float = 120,
     ) -> str:
@@ -390,99 +382,24 @@ class Runpodctl:
             raise ValueError(
                 "self-termination deadline must be between 600 and 21600 seconds"
             )
-        if request.compute_type.upper() == "CPU":
-            return self._create_cpu_pod_rest(
-                request,
-                self_terminate_seconds=self_terminate_seconds,
-                timeout=timeout,
-            )
-
-        args = [
-            "pod",
-            "create",
-            "--image",
-            request.image,
-            "--name",
-            request.name,
-            "--cloud-type",
-            request.cloud_type,
-            "--container-disk-in-gb",
-            str(request.container_disk_gb),
-            "--ports",
-            "22/tcp",
-            "--terminate-after",
-            terminate_after,
-            "--env",
-            json.dumps(
-                {"PUBLIC_KEY": request.public_key.strip()},
-                separators=(",", ":"),
-            ),
-        ]
-        if request.is_gpu_build:
-            # Keep compilation on the explicitly sized ephemeral container
-            # disk.  The pinned CLI path is retained so --terminate-after is
-            # still a platform-side backstop even if the runner disappears.
-            args.extend(["--volume-in-gb", "0"])
-        if request.data_center_ids:
-            args.extend(["--data-center-ids", request.data_center_ids])
-        if request.registry_auth_id:
-            args.extend(["--registry-auth-id", request.registry_auth_id])
-        if request.cloud_type.upper() == "COMMUNITY":
-            args.append("--public-ip")
-        args.extend(["--gpu-id", request.gpu_id or "", "--gpu-count", "1"])
-        if request.min_cuda_version:
-            args.extend(["--min-cuda-version", request.min_cuda_version])
-
-        try:
-            payload = self.call_json(*args, timeout=timeout)
-        except CommandError as exc:
-            if _is_capacity_unavailable_error(exc):
-                raise CapacityUnavailableError(str(exc)) from exc
-            raise
-        if not isinstance(payload, dict):
-            raise CommandError("runpodctl pod create returned a non-object response")
-        nested = payload.get("pod")
-        pod_id = payload.get("id") or (
-            nested.get("id") if isinstance(nested, dict) else None
-        )
-        if not isinstance(pod_id, str) or not pod_id:
-            raise CommandError("runpodctl pod create response did not contain a Pod id")
-        return pod_id
-
-    def _create_cpu_pod_rest(
-        self,
-        request: PodRequest,
-        *,
-        self_terminate_seconds: int,
-        timeout: float,
-    ) -> str:
-        """Create a sized CPU Pod, which runpodctl v2.3.0 cannot express."""
-
-        pod_env = {
-            "PUBLIC_KEY": request.public_key.strip(),
-            "RUNPOD_SELF_TERMINATE_SECONDS": str(self_terminate_seconds),
-        }
-        if self._rest_api_url != DEFAULT_REST_API_URL:
-            # The in-Pod self-terminate watchdog runs runpodctl too; keep it on
-            # the same environment as the Pod, or it deletes nothing.
-            pod_env["RUNPOD_API_URL"] = self._rest_api_url
+        env = {"PUBLIC_KEY": request.public_key.strip()}
+        is_build = request.compute_type.upper() == "CPU" or request.is_gpu_build
+        if is_build:
+            # REST v2 has no platform-side terminate-after, so the builder
+            # image's in-Pod watchdog is the backstop if the runner disappears.
+            env["RUNPOD_SELF_TERMINATE_SECONDS"] = str(self_terminate_seconds)
+            if self._api_url != DEFAULT_API_URL:
+                # The watchdog calls the API too; keep it on the Pod's environment.
+                env["RUNPOD_API_URL"] = self._api_url
         payload: dict[str, object] = {
             "name": request.name,
-            "imageName": request.image,
-            "computeType": "CPU",
-            "cloudType": request.cloud_type.upper(),
-            "containerDiskInGb": request.container_disk_gb,
-            # The REST service otherwise provisions its default /workspace
-            # Pod volume. CPU compilation is intentionally ephemeral under
-            # /work on containerDiskInGb, so explicitly disable that volume.
-            "volumeInGb": 0,
-            "volumeMountPath": "/workspace",
+            "image": request.image,
+            "cloud": request.cloud_type.upper(),
+            # Compilation stays on the sized ephemeral container disk; REST v2
+            # attaches no persistent volume unless `mounts` asks for one.
+            "disk": request.container_disk_gb,
             "ports": ["22/tcp"],
-            "supportPublicIp": request.cloud_type.upper() == "COMMUNITY",
-            "cpuFlavorIds": list(request.cpu_flavor_ids),
-            "cpuFlavorPriority": "custom",
-            "vcpuCount": request.cpu_vcpu_count,
-            "env": pod_env,
+            "env": env,
         }
         if request.data_center_ids:
             payload["dataCenterIds"] = [
@@ -490,17 +407,42 @@ class Runpodctl:
                 for value in request.data_center_ids.split(",")
                 if value.strip()
             ]
-            payload["dataCenterPriority"] = "custom"
         if request.registry_auth_id:
-            payload["containerRegistryAuthId"] = request.registry_auth_id
+            payload["registry"] = request.registry_auth_id
 
-        response = self._http_executor(
-            "POST",
-            f"{self._rest_api_url}/pods",
-            payload,
-            self._rest_headers(),
-            timeout,
-        )
+        if request.compute_type.upper() == "GPU":
+            gpu: dict[str, object] = {"id": request.gpu_id or "", "count": 1}
+            if request.min_cuda_version:
+                gpu["minCudaVersion"] = request.min_cuda_version
+            if request.is_gpu_build:
+                # Placement filters, so an undersized host is never created.
+                gpu["minVcpuCountPerGpu"] = request.gpu_min_vcpu_count
+                gpu["minRamPerGpu"] = request.gpu_min_memory_gb
+            return self._create(dict(payload, gpu=gpu), timeout=timeout)
+
+        # REST v2 places one CPU flavor per create; walk the ordered list.
+        last_error: CapacityUnavailableError | None = None
+        for flavor in request.cpu_flavor_ids:
+            cpu = {"id": flavor, "vcpuCount": request.cpu_vcpu_count}
+            try:
+                return self._create(dict(payload, cpu=cpu), timeout=timeout)
+            except CapacityUnavailableError as exc:
+                print(
+                    f"CPU flavor {flavor!r} has no matching capacity: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                last_error = exc
+        assert last_error is not None  # validate() requires at least one flavor
+        raise last_error
+
+    def _create(self, payload: Mapping[str, object], *, timeout: float) -> str:
+        try:
+            response = self._request("POST", "/pods", payload, timeout=timeout)
+        except CommandError as exc:
+            if _is_capacity_unavailable_error(exc):
+                raise CapacityUnavailableError(str(exc)) from exc
+            raise
         if not isinstance(response, dict):
             raise CommandError("Runpod REST Pod create returned a non-object response")
         pod_id = response.get("id")
@@ -508,31 +450,21 @@ class Runpodctl:
             raise CommandError("Runpod REST Pod create response did not contain a Pod id")
         return pod_id
 
-    def assignment_details(
-        self,
-        pod_id: str,
-        *,
-        timeout: float = 30,
-    ) -> dict[str, object]:
-        payload = self._http_executor(
-            "GET",
-            f"{self._rest_api_url}/pods/{pod_id}?includeMachine=true",
-            None,
-            self._rest_headers(),
-            timeout,
-        )
+    def pod_details(self, pod_id: str, *, timeout: float = 30) -> dict[str, object]:
+        payload = self._request("GET", f"/pods/{pod_id}", timeout=timeout)
         if not isinstance(payload, dict):
             raise CommandError("Runpod REST Pod get returned a non-object response")
         return payload
 
-    def pod_details(self, pod_id: str, *, timeout: float = 30) -> dict[str, object]:
-        payload = self.call_json("pod", "get", pod_id, timeout=timeout)
-        if not isinstance(payload, dict):
-            raise CommandError("runpodctl pod get returned a non-object response")
-        return payload
+    # The single-Pod read carries both readiness and the assigned resources.
+    assignment_details = pod_details
 
     def terminate_pod(self, pod_id: str, *, timeout: float = 30) -> None:
-        self.call("pod", "delete", pod_id, timeout=timeout)
+        try:
+            self._request("DELETE", f"/pods/{pod_id}", timeout=timeout)
+        except RestApiError as exc:
+            if exc.status != 404:  # already gone is the goal of cleanup
+                raise
 
 
 def _validate_remote_dir(path: str) -> None:
@@ -548,52 +480,28 @@ def _validate_relative_remote_path(path: str) -> None:
 
 
 def _extract_ssh_endpoint(payload: Mapping[str, object]) -> Endpoint | None:
-    """Accept both current runpodctl SSH output and older runtime port maps."""
+    """Return the Pod's direct SSH mapping from a REST v2 Pod read.
+
+    Only ``ssh.direct`` is usable: the SSH proxy carries an interactive shell
+    but not the SCP this job uses for upload and artifact download.
+    """
 
     ssh = payload.get("ssh")
-    if isinstance(ssh, Mapping):
-        host = ssh.get("ip") or ssh.get("host")
-        port = ssh.get("port")
-        if host and port:
-            try:
-                return Endpoint(str(host), int(port))
-            except (TypeError, ValueError):
-                pass
-
-    runtime = payload.get("runtime")
-    if isinstance(runtime, Mapping):
-        ports = runtime.get("ports")
-        if isinstance(ports, list):
-            for item in ports:
-                if not isinstance(item, Mapping):
-                    continue
-                private_port = item.get("privatePort") or item.get("containerPort")
-                if str(private_port) != "22":
-                    continue
-                host = item.get("ip") or item.get("host")
-                port = item.get("publicPort") or item.get("port")
-                if host and port:
-                    try:
-                        return Endpoint(str(host), int(port))
-                    except (TypeError, ValueError):
-                        continue
-    public_ip = payload.get("publicIp")
-    mappings = payload.get("portMappings")
-    if public_ip and isinstance(mappings, Mapping):
-        public_port = mappings.get("22") or mappings.get(22)
-        if public_port:
-            try:
-                return Endpoint(str(public_ip), int(public_port))
-            except (TypeError, ValueError):
-                pass
-    return None
+    direct = ssh.get("direct") if isinstance(ssh, Mapping) else None
+    if not isinstance(direct, Mapping):
+        return None
+    host = direct.get("host")
+    port = direct.get("port")
+    if not host or not port:
+        return None
+    try:
+        return Endpoint(str(host), int(port))
+    except (TypeError, ValueError):
+        return None
 
 
 def _pod_status(payload: Mapping[str, object]) -> str:
-    status = payload.get("status") or payload.get("desiredStatus")
-    if status is None and isinstance(payload.get("pod"), Mapping):
-        status = payload["pod"].get("status")  # type: ignore[index]
-    return str(status or "UNKNOWN").upper()
+    return str(payload.get("status") or "UNKNOWN").upper()
 
 
 class SSHTransport:
@@ -954,11 +862,11 @@ def _safe_extract(archive_path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
-_TERMINAL_STATES = {"DEAD", "ERROR", "EXITED", "FAILED", "TERMINATED"}
+_TERMINAL_STATES = {"ERROR", "EXITED", "TERMINATED"}
 
 
 def wait_for_ssh(
-    ctl: Runpodctl,
+    ctl: RunpodApi,
     transport: SSHTransport,
     pod_id: str,
     deadline: Deadline,
@@ -977,7 +885,7 @@ def wait_for_ssh(
             last_status = status
         if status in _TERMINAL_STATES:
             raise JobError(f"Pod {pod_id} entered terminal state {status}")
-        endpoint = _extract_ssh_endpoint(details)
+        endpoint = _extract_ssh_endpoint(details) if status == "RUNNING" else None
         if endpoint and transport.probe(endpoint, timeout=deadline.timeout(15)):
             print(
                 f"Pod {pod_id}: SSH ready at {endpoint.host}:{endpoint.port}",
@@ -987,9 +895,21 @@ def wait_for_ssh(
         sleep(min(max(0.1, poll_seconds), deadline.timeout()))
 
 
-def _assignment_payload(details: Mapping[str, object]) -> Mapping[str, object]:
-    nested = details.get("pod")
-    return nested if isinstance(nested, Mapping) else details
+def _compute(details: Mapping[str, object], kind: str) -> Mapping[str, object]:
+    """Return the REST v2 ``gpu`` or ``cpu`` block, or an empty mapping."""
+
+    block = details.get(kind)
+    return block if isinstance(block, Mapping) else {}
+
+
+def _persistent_volume_gb(details: Mapping[str, object]) -> object:
+    """Return the Pod volume size, or 0 when no persistent mount exists."""
+
+    mounts = details.get("mounts")
+    persistent = mounts.get("persistent") if isinstance(mounts, Mapping) else None
+    if persistent is None:
+        return 0
+    return persistent.get("size") if isinstance(persistent, Mapping) else persistent
 
 
 def _finite_decimal(details: Mapping[str, object], name: str) -> Decimal | None:
@@ -1020,130 +940,82 @@ def _memory_bytes(details: Mapping[str, object], name: str) -> tuple[Decimal, in
     return memory_gb, int(memory_bytes)
 
 
-def _gpu_type_ids(details: Mapping[str, object]) -> tuple[str, ...]:
-    """Collect exact GPU ids from documented current and legacy shapes."""
-
-    found: list[str] = []
-
-    def add(value: object) -> None:
-        if isinstance(value, str) and value and value not in found:
-            found.append(value)
-
-    add(details.get("gpuTypeId"))
-    gpu = details.get("gpu")
-    if isinstance(gpu, Mapping):
-        add(gpu.get("id"))
-    machine = details.get("machine")
-    if isinstance(machine, Mapping):
-        add(machine.get("gpuTypeId"))
-        machine_gpu = machine.get("gpuType")
-        if isinstance(machine_gpu, Mapping):
-            add(machine_gpu.get("id"))
-    return tuple(found)
-
-
 def verify_pod_assignment(
-    ctl: Runpodctl,
+    ctl: RunpodApi,
     pod_id: str,
     request: PodRequest,
     deadline: Deadline,
 ) -> VerifiedBuildAssignment | None:
     """Refuse image, placement, or build-resource drift before source upload."""
 
-    details = _assignment_payload(
-        ctl.assignment_details(pod_id, timeout=deadline.timeout(30))
-    )
-    actual_image = details.get("imageName") or details.get("image")
+    details = ctl.assignment_details(pod_id, timeout=deadline.timeout(30))
+    actual_image = details.get("image")
     if actual_image != request.image:
         raise JobError(
             f"Pod image mismatch: expected {request.image!r}, got {actual_image!r}"
         )
-    if request.compute_type.upper() == "GPU":
-        gpu_type_ids = _gpu_type_ids(details)
-        if not gpu_type_ids or any(
-            gpu_type_id != request.gpu_id for gpu_type_id in gpu_type_ids
-        ):
+    is_gpu = request.compute_type.upper() == "GPU"
+    # Drift on a GPU candidate is retryable on the next candidate; on the
+    # single CPU placement it is fatal.
+    drift_error: type[JobError] = GpuPlacementError if is_gpu else JobError
+    if is_gpu:
+        gpu = _compute(details, "gpu")
+        gpu_type_id = gpu.get("id")
+        if gpu_type_id != request.gpu_id:
             raise GpuPlacementError(
                 f"GPU type mismatch: expected exact gpuId {request.gpu_id!r}, "
-                f"got {gpu_type_ids or None!r}"
+                f"got {gpu_type_id!r}"
             )
-        gpu_type_id = gpu_type_ids[0]
         if not request.is_gpu_build:
             print(
                 f"Pod {pod_id}: verified image and gpu_id={gpu_type_id}",
                 flush=True,
             )
             return None
+        compute = gpu
+        minimum_vcpus = request.gpu_min_vcpu_count
+        minimum_memory_gb = request.gpu_min_memory_gb
+        placement = f"gpu_id={gpu_type_id}"
+        label = "GPU build "
+    else:
+        compute = _compute(details, "cpu")
+        flavor = compute.get("id")
+        if flavor not in request.cpu_flavor_ids:
+            raise JobError(
+                "CPU flavor mismatch: expected one of "
+                f"{request.cpu_flavor_ids!r}, got {flavor!r}"
+            )
+        minimum_vcpus = request.cpu_vcpu_count
+        minimum_memory_gb = request.cpu_min_memory_gb
+        placement = f"flavor={flavor}"
+        label = ""
 
-        vcpus = _integer(details, "vcpuCount")
-        if vcpus is None or vcpus < request.gpu_min_vcpu_count:
-            raise GpuPlacementError(
-                f"GPU build CPU count mismatch: required at least "
-                f"{request.gpu_min_vcpu_count}, got {details.get('vcpuCount')!r}"
-            )
-        memory = _memory_bytes(details, "memoryInGb")
-        if memory is None or memory[0] < request.gpu_min_memory_gb:
-            raise GpuPlacementError(
-                f"GPU build memory mismatch: required at least "
-                f"{request.gpu_min_memory_gb} GB, "
-                f"got {details.get('memoryInGb')!r}"
-            )
-        memory_gb, assigned_memory_bytes = memory
-        container_disk = _integer(details, "containerDiskInGb")
-        if container_disk is None or container_disk < request.container_disk_gb:
-            raise GpuPlacementError(
-                f"container disk mismatch: requested at least "
-                f"{request.container_disk_gb} GB, "
-                f"got {details.get('containerDiskInGb')!r}"
-            )
-        pod_volume = _integer(details, "volumeInGb")
-        if pod_volume != 0:
-            raise GpuPlacementError(
-                "unexpected paid Pod volume: requested 0 GB, "
-                f"got {details.get('volumeInGb')!r}"
-            )
-        print(
-            f"Pod {pod_id}: verified image, gpu_id={gpu_type_id}, "
-            f"vcpus={vcpus}, memory={memory_gb:g} GB, "
-            f"container_disk={container_disk} GB, pod_volume=0 GB",
-            flush=True,
+    vcpus = _integer(compute, "vcpuCount")
+    if vcpus is None or vcpus < minimum_vcpus:
+        raise drift_error(
+            f"{label}CPU count mismatch: required at least {minimum_vcpus}, "
+            f"got {compute.get('vcpuCount')!r}"
         )
-        return VerifiedBuildAssignment(vcpus, assigned_memory_bytes)
-
-    flavor = details.get("cpuFlavorId")
-    if flavor not in request.cpu_flavor_ids:
-        raise JobError(
-            "CPU flavor mismatch: expected one of "
-            f"{request.cpu_flavor_ids!r}, got {flavor!r}"
-        )
-    vcpus = _integer(details, "vcpuCount")
-    if vcpus is None or vcpus < request.cpu_vcpu_count:
-        raise JobError(
-            f"CPU count mismatch: requested at least {request.cpu_vcpu_count}, "
-            f"got {details.get('vcpuCount')!r}"
-        )
-    memory = _memory_bytes(details, "memoryInGb")
-    if memory is None or memory[0] < request.cpu_min_memory_gb:
-        raise JobError(
-            f"memory mismatch: required at least {request.cpu_min_memory_gb} GB, "
-            f"got {details.get('memoryInGb')!r}"
+    memory = _memory_bytes(compute, "memory")
+    if memory is None or memory[0] < minimum_memory_gb:
+        raise drift_error(
+            f"{label}memory mismatch: required at least {minimum_memory_gb} GB, "
+            f"got {compute.get('memory')!r}"
         )
     memory_gb, assigned_memory_bytes = memory
-    container_disk = _integer(details, "containerDiskInGb")
+    container_disk = _integer(details, "disk")
     if container_disk is None or container_disk < request.container_disk_gb:
-        raise JobError(
+        raise drift_error(
             f"container disk mismatch: requested at least "
-            f"{request.container_disk_gb} GB, "
-            f"got {details.get('containerDiskInGb')!r}"
+            f"{request.container_disk_gb} GB, got {details.get('disk')!r}"
         )
-    pod_volume = _integer(details, "volumeInGb")
+    pod_volume = _persistent_volume_gb(details)
     if pod_volume != 0:
-        raise JobError(
-            "unexpected paid Pod volume: requested 0 GB, "
-            f"got {details.get('volumeInGb')!r}"
+        raise drift_error(
+            f"unexpected paid Pod volume: requested 0 GB, got {pod_volume!r}"
         )
     print(
-        f"Pod {pod_id}: verified image, flavor={flavor}, "
+        f"Pod {pod_id}: verified image, {placement}, "
         f"vcpus={vcpus}, memory={memory_gb:g} GB, "
         f"container_disk={container_disk} GB, pod_volume=0 GB",
         flush=True,
@@ -1151,7 +1023,7 @@ def verify_pod_assignment(
     return VerifiedBuildAssignment(vcpus, assigned_memory_bytes)
 
 
-def _terminate_strictly(ctl: Runpodctl, pod_id: str) -> Exception | None:
+def _terminate_strictly(ctl: RunpodApi, pod_id: str) -> Exception | None:
     """Try deletion repeatedly within a small cleanup-only grace window."""
 
     last_error: Exception | None = None
@@ -1170,24 +1042,6 @@ def _terminate_strictly(ctl: Runpodctl, pod_id: str) -> Exception | None:
             if attempt < 3:
                 time.sleep(2)
     return last_error
-
-
-def _rfc3339_after(
-    seconds: int,
-    *,
-    now: datetime | None = None,
-) -> str:
-    """Return the RFC3339 datetime required by pinned runpodctl v2.3.0."""
-
-    if seconds <= 0:
-        raise ValueError("termination interval must be positive")
-    base = now or datetime.now(timezone.utc)
-    if base.tzinfo is None:
-        raise ValueError("now must be timezone-aware")
-    target = (base.astimezone(timezone.utc) + timedelta(seconds=seconds)).replace(
-        microsecond=0
-    )
-    return target.isoformat().replace("+00:00", "Z")
 
 
 GPU_PLACEMENT_ROUNDS = 2
@@ -1220,7 +1074,7 @@ def _gpu_candidates(spec: JobSpec) -> tuple[str, ...]:
 def run_job(
     spec: JobSpec,
     *,
-    ctl: Runpodctl | None = None,
+    ctl: RunpodApi | None = None,
     transport: SSHTransport | None = None,
     wait_fn: Callable[..., Endpoint] = wait_for_ssh,
 ) -> JobResult:
@@ -1229,7 +1083,7 @@ def run_job(
     spec.validate()
     is_build_job = spec.pod.compute_type.upper() == "CPU" or spec.pod.is_gpu_build
     deadline = Deadline(spec.hard_timeout_seconds)
-    ctl = ctl or Runpodctl()
+    ctl = ctl or RunpodApi()
     transport = transport or SSHTransport(spec.ssh_private_key)
     pod_id: str | None = None
     endpoint: Endpoint | None = None
@@ -1244,16 +1098,14 @@ def run_job(
         self_terminate_seconds = (
             spec.hard_timeout_seconds + spec.terminate_grace_seconds
         )
-        terminate_after = _rfc3339_after(self_terminate_seconds)
         if spec.pod.compute_type.upper() == "CPU":
             print(
                 "CPU placement attempt 1/1: requesting Pod "
-                f"{spec.pod.name!r}; terminate-after={terminate_after}",
+                f"{spec.pod.name!r}; self-delete after {self_terminate_seconds}s",
                 flush=True,
             )
             pod_id = ctl.create_pod(
                 spec.pod,
-                terminate_after=terminate_after,
                 self_terminate_seconds=self_terminate_seconds,
                 timeout=deadline.timeout(120),
             )
@@ -1295,14 +1147,12 @@ def run_job(
                     print(
                         f"Trying GPU candidate {candidate_number}/{len(candidates)} "
                         f"(round {round_number}/{GPU_PLACEMENT_ROUNDS}): "
-                        f"requesting exact gpuId {candidate!r}; "
-                        f"terminate-after={terminate_after}",
+                        f"requesting exact gpuId {candidate!r}",
                         flush=True,
                     )
                     try:
                         pod_id = ctl.create_pod(
                             candidate_request,
-                            terminate_after=terminate_after,
                             self_terminate_seconds=self_terminate_seconds,
                             timeout=deadline.timeout(120),
                         )
@@ -1319,8 +1169,7 @@ def run_job(
                         continue
 
                     print(
-                        f"Created GPU Pod {pod_id} for candidate {candidate!r}; "
-                        f"terminate-after={terminate_after}",
+                        f"Created GPU Pod {pod_id} for candidate {candidate!r}",
                         flush=True,
                     )
                     endpoint = wait_fn(

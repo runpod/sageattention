@@ -239,14 +239,12 @@ on:
 permissions:
   contents: read
 
-# Unset repository variables leave these empty, and runpodctl and
-# tools/runpod_job.py then use production. Set RUNPOD_API_URL and
-# RUNPOD_GRAPHQL_URL to target another Runpod environment, such as dev.
-# APIURL is the name runpodctl's `user` command reads its GraphQL URL from.
+# Runpod REST API v2 base URL. An unset repository variable leaves this empty
+# and tools/runpod_job.py uses production (https://api.runpod.io/v2); set the
+# RUNPOD_API_URL variable to target another environment, such as
+# https://api.runpod.dev/v2.
 env:
   RUNPOD_API_URL: ${{ vars.RUNPOD_API_URL }}
-  RUNPOD_GRAPHQL_URL: ${{ vars.RUNPOD_GRAPHQL_URL }}
-  APIURL: ${{ vars.RUNPOD_GRAPHQL_URL }}
 
 concurrency:
   group: wheel-factory-${{ inputs.source_ref }}
@@ -555,19 +553,6 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.source_sha }}
 
-      - name: Install checksum-pinned runpodctl
-        shell: bash
-        env:
-          RUNPODCTL_VERSION: v2.3.0
-          RUNPODCTL_SHA256: 908f2210571e8a26a1cba6fb45f09556b34dcad3e1b20dd502df2adf7a57c169
-        run: |
-          curl -fsSL --proto '=https' --tlsv1.2 \
-            "https://github.com/runpod/runpodctl/releases/download/${RUNPODCTL_VERSION}/runpodctl-linux-amd64.tar.gz" \
-            -o "${RUNNER_TEMP}/runpodctl.tar.gz"
-          echo "${RUNPODCTL_SHA256}  ${RUNNER_TEMP}/runpodctl.tar.gz" | sha256sum -c -
-          sudo tar -xzf "${RUNNER_TEMP}/runpodctl.tar.gz" -C /usr/local/bin runpodctl
-          runpodctl version
-
       - name: Materialize ephemeral SSH identity
         shell: bash
         env:
@@ -730,19 +715,6 @@ jobs:
         env:
           BUILD_ID: ${{ matrix.build_id }}
         run: (cd "dist/${BUILD_ID}" && sha256sum -c SHA256SUMS)
-
-      - name: Install checksum-pinned runpodctl
-        shell: bash
-        env:
-          RUNPODCTL_VERSION: v2.3.0
-          RUNPODCTL_SHA256: 908f2210571e8a26a1cba6fb45f09556b34dcad3e1b20dd502df2adf7a57c169
-        run: |
-          curl -fsSL --proto '=https' --tlsv1.2 \
-            "https://github.com/runpod/runpodctl/releases/download/${RUNPODCTL_VERSION}/runpodctl-linux-amd64.tar.gz" \
-            -o "${RUNNER_TEMP}/runpodctl.tar.gz"
-          echo "${RUNPODCTL_SHA256}  ${RUNNER_TEMP}/runpodctl.tar.gz" | sha256sum -c -
-          sudo tar -xzf "${RUNNER_TEMP}/runpodctl.tar.gz" -C /usr/local/bin runpodctl
-          runpodctl version
 
       - name: Materialize ephemeral SSH identity
         shell: bash
