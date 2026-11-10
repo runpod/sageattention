@@ -16,6 +16,8 @@ jobs:
     with:
       source_ref: ${{ github.sha }}
       confirm_paid_pods: true
+      # Dev has none of the reviewed build GPUs; compile on a cpu3g Pod instead.
+      build_backend: CPU
     secrets:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       RUNPOD_SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}

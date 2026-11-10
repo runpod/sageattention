@@ -239,6 +239,15 @@ on:
 permissions:
   contents: read
 
+# Unset repository variables leave these empty, and runpodctl and
+# tools/runpod_job.py then use production. Set RUNPOD_API_URL and
+# RUNPOD_GRAPHQL_URL to target another Runpod environment, such as dev.
+# APIURL is the name runpodctl's `user` command reads its GraphQL URL from.
+env:
+  RUNPOD_API_URL: ${{ vars.RUNPOD_API_URL }}
+  RUNPOD_GRAPHQL_URL: ${{ vars.RUNPOD_GRAPHQL_URL }}
+  APIURL: ${{ vars.RUNPOD_GRAPHQL_URL }}
+
 concurrency:
   group: wheel-factory-${{ inputs.source_ref }}
   cancel-in-progress: false

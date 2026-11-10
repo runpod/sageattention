@@ -230,6 +230,7 @@ class VerifiedBuildAssignment:
     assigned_memory_bytes: int
 
 
+DEFAULT_REST_API_URL = "https://rest.runpod.io/v1"
 Executor = Callable[..., subprocess.CompletedProcess[str]]
 HttpExecutor = Callable[
     [str, str, Mapping[str, object] | None, Mapping[str, str], float], object
@@ -306,12 +307,19 @@ class Runpodctl:
         executor: Executor = subprocess.run,
         env: Mapping[str, str] | None = None,
         http_executor: HttpExecutor = _http_json,
-        rest_api_url: str = "https://rest.runpod.io/v1",
+        rest_api_url: str | None = None,
     ) -> None:
         self.binary = binary
         self._executor = executor
         self._env = dict(env) if env is not None else None
         self._http_executor = http_executor
+        # Same variable runpodctl reads, so both clients target one environment.
+        environment = self._env if self._env is not None else os.environ
+        rest_api_url = (
+            rest_api_url
+            or environment.get("RUNPOD_API_URL", "").strip()
+            or DEFAULT_REST_API_URL
+        )
         self._rest_api_url = rest_api_url.rstrip("/")
 
     def call(
@@ -447,6 +455,14 @@ class Runpodctl:
     ) -> str:
         """Create a sized CPU Pod, which runpodctl v2.3.0 cannot express."""
 
+        pod_env = {
+            "PUBLIC_KEY": request.public_key.strip(),
+            "RUNPOD_SELF_TERMINATE_SECONDS": str(self_terminate_seconds),
+        }
+        if self._rest_api_url != DEFAULT_REST_API_URL:
+            # The in-Pod self-terminate watchdog runs runpodctl too; keep it on
+            # the same environment as the Pod, or it deletes nothing.
+            pod_env["RUNPOD_API_URL"] = self._rest_api_url
         payload: dict[str, object] = {
             "name": request.name,
             "imageName": request.image,
@@ -463,10 +479,7 @@ class Runpodctl:
             "cpuFlavorIds": list(request.cpu_flavor_ids),
             "cpuFlavorPriority": "custom",
             "vcpuCount": request.cpu_vcpu_count,
-            "env": {
-                "PUBLIC_KEY": request.public_key.strip(),
-                "RUNPOD_SELF_TERMINATE_SECONDS": str(self_terminate_seconds),
-            },
+            "env": pod_env,
         }
         if request.data_center_ids:
             payload["dataCenterIds"] = [
