@@ -25,3 +25,4 @@ jobs:
     secrets:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       RUNPOD_SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}
+      
