@@ -13,7 +13,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from runpod.github.sageattention.tools import pod_resources as pr
+from tools import pod_resources as pr
 
 
 def write(root: Path, absolute: str, content: str) -> Path:

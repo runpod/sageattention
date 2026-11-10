@@ -19,7 +19,7 @@ ARG RUNPODCTL_SHA256=908f2210571e8a26a1cba6fb45f09556b34dcad3e1b20dd502df2adf7a5
 
 LABEL org.opencontainers.image.title="SageAttention wheel builder" \
       org.opencontainers.image.description="GPU-independent, SSH-ready SageAttention wheel builder" \
-      org.opencontainers.image.source="https://github.com/runpod/runpod-sageattention" \
+      org.opencontainers.image.source="https://github.com/runpod/sageattention" \
       io.runpod.sageattention.cuda="${CUDA_VERSION}" \
       io.runpod.sageattention.torch="${TORCH_VERSION}"
 

@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from runpod.github.sageattention.tools.runpod_job import (
+from tools.runpod_job import (
     CapacityUnavailableError,
     CommandError,
     Deadline,
