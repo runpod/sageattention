@@ -59,19 +59,19 @@ def test_exact_build_matrix_matches_comfyui_base() -> None:
             "12.8", "2.10.0+cu128", "12.8",
             "2.2.0+torch2.10.0.cu128.sm90fix1",
             "runpod/comfyui@sha256:ce5e842ca0c7233a983ff76a83739b445172259c77a43a117453ef7e6a64d0b7",
-            "runpod/sageattention-wheel-builder@sha256:556979b41a98e5331ad38a1ae599161cb37a78cb09bec34e3f982978b84816d0",
+            "runpod/sageattention-wheel-builder@sha256:cc4b4a7a7f62354c13186874cd6d22f051828cbc38b1282ec8a3de2412b45b5e",
         ),
         "cp312-torch2.10.0-cu130": (
             "13.0", "2.10.0+cu130", "13.0",
             "2.2.0+torch2.10.0.cu130.sm90fix1",
             "runpod/comfyui@sha256:0bf75436da591e0f26d299af3741e07cb8ce8ce36566d1a7d8d78aae458e5d67",
-            "runpod/sageattention-wheel-builder@sha256:bed84f32bf76ba292728faf9fbe446d5d7f84d194444b2b6d006e663cccba906",
+            "runpod/sageattention-wheel-builder@sha256:57a027b4e79e8befd8cc0f97b8a274bee3bd6dfe60a73580b1cfd44ce5ffdf5d",
         ),
         "cp312-torch2.13.0-cu132": (
             "13.2", "2.13.0+cu132", "13.2",
             "2.2.0+torch2.13.0.cu132.sm90fix1",
             "runpod/comfyui@sha256:0d9b67c84316f70417c27b300740e35254b508234c348502261189ecbbc4024e",
-            "runpod/sageattention-wheel-builder@sha256:FILL-AFTER-PUSHING-builder-cu132",
+            "runpod/sageattention-wheel-builder@sha256:60426a4a49e06ac2022648513607a5424bb454277a24280816eea1b34505085f",
         ),
     }
     for build_id, values in expected.items():

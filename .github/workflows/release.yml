@@ -23,17 +23,17 @@ on:
       builder_image_cu128:
         description: Immutable CUDA 12.8 builder image (@sha256 required)
         required: true
-        default: "runpod/sageattention-wheel-builder@sha256:556979b41a98e5331ad38a1ae599161cb37a78cb09bec34e3f982978b84816d0"
+        default: "runpod/sageattention-wheel-builder@sha256:cc4b4a7a7f62354c13186874cd6d22f051828cbc38b1282ec8a3de2412b45b5e"
         type: string
       builder_image_cu130:
         description: Immutable CUDA 13.0 builder image (@sha256 required)
         required: true
-        default: "runpod/sageattention-wheel-builder@sha256:bed84f32bf76ba292728faf9fbe446d5d7f84d194444b2b6d006e663cccba906"
+        default: "runpod/sageattention-wheel-builder@sha256:57a027b4e79e8befd8cc0f97b8a274bee3bd6dfe60a73580b1cfd44ce5ffdf5d"
         type: string
       builder_image_cu132:
         description: Immutable CUDA 13.2 builder image (@sha256 required)
         required: true
-        default: "runpod/sageattention-wheel-builder@sha256:FILL-AFTER-PUSHING-builder-cu132"
+        default: "runpod/sageattention-wheel-builder@sha256:60426a4a49e06ac2022648513607a5424bb454277a24280816eea1b34505085f"
         type: string
       runtime_image_cu128:
         description: Immutable ComfyUI-compatible cu128 image (@sha256 required)
