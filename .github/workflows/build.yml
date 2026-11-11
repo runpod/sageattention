@@ -77,13 +77,13 @@ on:
         default: "NVIDIA GeForce RTX 5090,NVIDIA RTX PRO 6000 Blackwell Server Edition,NVIDIA RTX PRO 6000 Blackwell Workstation Edition,NVIDIA RTX PRO 4500 Blackwell Server Edition,NVIDIA RTX PRO 4500 Blackwell"
         type: string
       cloud_type:
-        description: Runpod capacity pool
+        description: Runpod capacity pool (Community has had no CUDA 13 hosts for the cu130/cu132 builds and tests)
         required: true
-        default: COMMUNITY
+        default: SECURE
         type: choice
         options:
-          - COMMUNITY
           - SECURE
+          - COMMUNITY
       registry_auth_id:
         description: Optional Runpod registry-auth id for private/rate-limited images
         required: false
@@ -190,7 +190,7 @@ on:
         type: string
       cloud_type:
         required: false
-        default: COMMUNITY
+        default: SECURE
         type: string
       registry_auth_id:
         required: false
