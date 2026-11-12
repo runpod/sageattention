@@ -1626,7 +1626,15 @@ def supervise_process_group_rss(
                 break
 
             if not sample():
-                child_returncode = child.poll()
+                # An exiting process releases its memory (statm reads zero)
+                # before the kernel makes it reapable, so a sample can land in
+                # between: no RSS, yet poll() still says running.  Give the
+                # leader a moment to finish exiting before calling the group
+                # lost, or a normal exit races into a monitor error.
+                try:
+                    child_returncode = child.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    child_returncode = None
                 if child_returncode is not None and not _process_group_exists(
                     process_group
                 ):

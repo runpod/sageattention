@@ -811,6 +811,41 @@ class PodResourcesTests(unittest.TestCase):
             self.assertFalse(payload["observed_compiler_executable"])
             self.assertIn("no compiler executable", payload["monitor_error"])
 
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups")
+    def test_process_group_supervisor_waits_out_an_exiting_leader(self) -> None:
+        # An exiting process frees its memory (statm reads zero) before it
+        # becomes reapable. A sample in that gap used to report the group as
+        # "disappeared" and exit 70 instead of the command's own status.
+        calls = {"count": 0}
+
+        def fake_collect(*_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return (4096, 1, True, set())
+            return (0, 0, False, set())
+
+        original = pr._collect_process_group_details
+        pr._collect_process_group_details = fake_collect
+        try:
+            with self.fixture_root() as raw_root:
+                output = Path(raw_root) / "rss.json"
+                status = pr.supervise_process_group_rss(
+                    output,
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys, time; time.sleep(.3); sys.exit(3)",
+                    ],
+                    interval_ms=50,
+                    termination_grace_seconds=1,
+                )
+                payload = json.loads(output.read_text(encoding="utf-8"))
+        finally:
+            pr._collect_process_group_details = original
+        self.assertEqual(status, 3)
+        self.assertIsNone(payload["monitor_error"])
+        self.assertEqual(payload["child_returncode"], 3)
+
     @unittest.skipUnless(os.name == "posix" and Path("/proc").is_dir(), "Linux /proc")
     def test_process_group_supervisor_forwards_hup_int_and_term(self) -> None:
         for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
