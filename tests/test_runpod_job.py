@@ -197,24 +197,42 @@ class RunpodApiTests(unittest.TestCase):
             ctl.check_auth()
 
     def test_auth_check_proves_write_access_without_side_effects(self) -> None:
-        for answer in (NOT_FOUND, RestApiError("POST", 400, "invalid pod id")):
-            with self.subTest(status=answer.status):
+        for answer in (
+            RestApiError("POST", 404, "resource not found"),  # the v2 spec's body
+            NOT_FOUND,
+            RestApiError("POST", 400, "invalid pod id"),
+        ):
+            with self.subTest(status=answer.status, detail=answer.detail):
                 ctl, http = api({"items": []}, answer)
                 ctl.check_auth()
                 method, url, payload, _, _ = http.calls[1]
                 self.assertEqual(method, "POST")
+                # v2 replaced v1's POST /pods/{id}/stop with /action.
                 self.assertEqual(
                     url,
                     "https://api.runpod.io/v2/pods/"
-                    f"{AUTH_PROBE_POD_ID}/stop",
+                    f"{AUTH_PROBE_POD_ID}/action",
                 )
-                self.assertIsNone(payload)
+                self.assertEqual(payload, {"action": "stop"})
 
     def test_read_only_key_fails_the_auth_check(self) -> None:
         for status in (401, 403):
             with self.subTest(status=status):
                 ctl, _ = api({"items": []}, RestApiError("POST", status, "denied"))
                 with self.assertRaisesRegex(CommandError, "read/write Pod access"):
+                    ctl.check_auth()
+
+    def test_unexplained_probe_answer_fails_the_auth_check(self) -> None:
+        # A 404 from an unknown route (or any other status) says nothing about
+        # the key, so it must not pass as proof of write access.
+        for answer in (
+            RestApiError("POST", 404, "404 page not found"),
+            RestApiError("POST", 405, "method not allowed"),
+            RestApiError("POST", 409, "conflict"),
+        ):
+            with self.subTest(status=answer.status, detail=answer.detail):
+                ctl, _ = api({"items": []}, answer)
+                with self.assertRaisesRegex(CommandError, "cannot confirm"):
                     ctl.check_auth()
 
     def test_list_pods_accepts_a_bare_or_wrapped_list(self) -> None:

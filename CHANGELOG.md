@@ -10,7 +10,9 @@
 - Treat only a REST `400` that reports missing capacity as a capacity miss. A
   `403` or any other `400` now fails on the first candidate instead of waiting
   through every placement round, and the auth check proves write access with a
-  no-op stop of a Pod id that cannot exist.
+  no-op v2 `stop` action (`POST /pods/{id}/action`) on a Pod id that
+  cannot exist; only 401/403 (read-only key), 400, or a 404 naming a missing
+  resource are understood, and anything else fails the check.
 - Check in CI that builder and runtime image pins in `build.yml` (dispatch and
   call) and `release.yml` match `matrix.json`.
 - Validate the cu128 and cu130 wheels on `runpod/comfyui` 1.7.0, the image the

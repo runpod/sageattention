@@ -298,6 +298,13 @@ def _is_capacity_unavailable_error(error: CommandError) -> bool:
     return any(message in normalized for message in _CAPACITY_MESSAGES)
 
 
+def _is_missing_resource(detail: str) -> bool:
+    """A 404 body that names a missing resource, not an unknown route."""
+
+    normalized = " ".join(detail.casefold().split())
+    return "resource not found" in normalized or "pod not found" in normalized
+
+
 def _http_json(
     method: str,
     url: str,
@@ -387,14 +394,23 @@ class RunpodApi:
         """Fail before any create when the key cannot manage Pods.
 
         Reading ``/pods`` only proves read access; a read-only key passes it
-        and then gets 403 on every create.  Stopping a Pod that does not exist
-        is a write the API must authorize first, and it changes nothing: an
-        authorized key gets 400 or 404, a read-only key 401 or 403.
+        and then gets 403 on every create.  A ``stop`` action
+        (``POST /pods/{id}/action``, scope ``pods:write``) on a Pod id that
+        cannot exist is a write the API must authorize first, and it changes
+        nothing: a read-only key gets 401 or 403, an authorized key gets the
+        spec's 404 "resource not found" (or a 400 for the id).  Any other 404,
+        such as an unknown route, proves nothing and fails the check rather
+        than letting every key through.
         """
 
         self._request("GET", "/pods?limit=1", timeout=timeout)
         try:
-            self._request("POST", f"/pods/{AUTH_PROBE_POD_ID}/stop", timeout=timeout)
+            self._request(
+                "POST",
+                f"/pods/{AUTH_PROBE_POD_ID}/action",
+                {"action": "stop"},
+                timeout=timeout,
+            )
         except RestApiError as exc:
             if exc.status in {401, 403}:
                 raise CommandError(
@@ -402,9 +418,14 @@ class RunpodApi:
                     f"(HTTP {exc.status} on a write probe); use a key with "
                     "read/write Pod access"
                 ) from exc
-            if exc.status not in {400, 404}:
-                raise
-            return
+            if exc.status == 400 or (
+                exc.status == 404 and _is_missing_resource(exc.detail)
+            ):
+                return
+            raise CommandError(
+                f"write probe got an unexpected HTTP {exc.status} "
+                f"({exc.detail!r}); cannot confirm the key may manage Pods"
+            ) from exc
         raise CommandError(
             f"write probe unexpectedly stopped a Pod named {AUTH_PROBE_POD_ID!r}"
         )
