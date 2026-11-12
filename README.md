@@ -126,10 +126,10 @@ fit above the sampled peak.
 - The exact PyTorch dependency is present in wheel metadata.
 - The installer refuses a CUDA/PyTorch mismatch or an ambiguous wheelhouse.
 - CUDA driver stubs are link-time-only builder inputs.
-- Every default GPU builder and validator receives an RFC3339 platform
-  termination deadline, and every job also has retried `finally` cleanup. An
-  in-Pod builder watchdog protects the explicit CPU fallback, whose
-  provisioning path has no verified platform deadline.
+- Every job has retried `finally` cleanup, builder Pods arm an in-Pod
+  self-delete watchdog, and an hourly reaper (`reap-pods.yml`) deletes any
+  factory Pod whose GitHub run is over. REST v2 has no platform-side
+  termination deadline.
 - GPU-backed manifests record the exact selected builder candidate; CPU
   fallback manifests use a stable `null` GPU-identity field.
 - Paid Pod workflows require an explicit dispatch/release gate.

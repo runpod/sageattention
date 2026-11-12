@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib import error as urllib_error
 
 from tools.runpod_job import (
+    AUTH_PROBE_POD_ID,
     CapacityUnavailableError,
     CommandError,
     Deadline,
@@ -70,6 +71,14 @@ class RecordingHttp:
         if isinstance(response, BaseException):
             raise response
         return response
+
+
+NO_CAPACITY = (
+    "There are no longer any instances available with the requested "
+    "specifications. Please refresh and try again."
+)
+# What an authorized key gets from check_auth's write probe.
+NOT_FOUND = RestApiError("POST", 404, "pod not found")
 
 
 def completed(stdout: str = "", stderr: str = "", code: int = 0):
@@ -173,7 +182,7 @@ class HttpTests(unittest.TestCase):
 
 class RunpodApiTests(unittest.TestCase):
     def test_requests_use_v2_bearer_auth_and_explicit_agent(self) -> None:
-        ctl, http = api({"items": []})
+        ctl, http = api({"items": []}, NOT_FOUND)
         ctl.check_auth()
         method, url, payload, headers, _ = http.calls[0]
         self.assertEqual((method, url), ("GET", "https://api.runpod.io/v2/pods?limit=1"))
@@ -186,6 +195,38 @@ class RunpodApiTests(unittest.TestCase):
         ctl, _ = api(RestApiError("GET", 401, "missing bearer token"))
         with self.assertRaisesRegex(CommandError, "HTTP 401"):
             ctl.check_auth()
+
+    def test_auth_check_proves_write_access_without_side_effects(self) -> None:
+        for answer in (NOT_FOUND, RestApiError("POST", 400, "invalid pod id")):
+            with self.subTest(status=answer.status):
+                ctl, http = api({"items": []}, answer)
+                ctl.check_auth()
+                method, url, payload, _, _ = http.calls[1]
+                self.assertEqual(method, "POST")
+                self.assertEqual(
+                    url,
+                    "https://api.runpod.io/v2/pods/"
+                    f"{AUTH_PROBE_POD_ID}/stop",
+                )
+                self.assertIsNone(payload)
+
+    def test_read_only_key_fails_the_auth_check(self) -> None:
+        for status in (401, 403):
+            with self.subTest(status=status):
+                ctl, _ = api({"items": []}, RestApiError("POST", status, "denied"))
+                with self.assertRaisesRegex(CommandError, "read/write Pod access"):
+                    ctl.check_auth()
+
+    def test_list_pods_accepts_a_bare_or_wrapped_list(self) -> None:
+        pods = [{"id": "a", "name": "sage-test-x"}]
+        for payload in (pods, {"items": pods}):
+            with self.subTest(payload=type(payload).__name__):
+                ctl, http = api(payload)
+                self.assertEqual(ctl.list_pods(), pods)
+                self.assertEqual(http.calls[0][:2], ("GET", "https://api.runpod.io/v2/pods"))
+        ctl, _ = api({"error": "x"})
+        with self.assertRaisesRegex(CommandError, "no list of Pods"):
+            ctl.list_pods()
 
     def test_cpu_create_uses_v2_shape_and_arms_the_watchdog(self) -> None:
         ctl, http = api({"id": "pod-cpu"})
@@ -213,7 +254,7 @@ class RunpodApiTests(unittest.TestCase):
 
     def test_cpu_create_walks_flavors_in_order_on_capacity(self) -> None:
         ctl, http = api(
-            RestApiError("POST", 400, "could not be placed"),
+            RestApiError("POST", 400, NO_CAPACITY),
             {"id": "pod-cpu"},
         )
         request = replace(CPU_REQUEST, cpu_flavor_ids=("cpu3g", "cpu5c"))
@@ -226,8 +267,8 @@ class RunpodApiTests(unittest.TestCase):
 
     def test_cpu_create_raises_capacity_when_every_flavor_is_full(self) -> None:
         ctl, _ = api(
-            RestApiError("POST", 400, "first"),
-            RestApiError("POST", 400, "last"),
+            RestApiError("POST", 400, "first: " + NO_CAPACITY),
+            RestApiError("POST", 400, "last: " + NO_CAPACITY),
         )
         request = replace(CPU_REQUEST, cpu_flavor_ids=("cpu3g", "cpu5c"))
         with self.assertRaisesRegex(CapacityUnavailableError, "last"):
@@ -295,19 +336,23 @@ class RunpodApiTests(unittest.TestCase):
         self.assertEqual(payload["env"]["RUNPOD_API_URL"], "https://api.runpod.dev/v2")
 
     def test_empty_api_url_variable_means_production(self) -> None:
-        ctl, http = api({"items": []}, RUNPOD_API_URL="")
+        ctl, http = api({"items": []}, NOT_FOUND, RUNPOD_API_URL="")
         ctl.check_auth()
         self.assertTrue(http.calls[0][1].startswith("https://api.runpod.io/v2/"))
 
     def test_create_classifies_only_documented_placement_failures(self) -> None:
-        for status in (400, 403):
-            with self.subTest(status=status):
-                ctl, _ = api(RestApiError("POST", status, "x"))
+        for detail in (NO_CAPACITY, "Insufficient resources"):
+            with self.subTest(detail=detail):
+                ctl, _ = api(RestApiError("POST", 400, detail))
                 with self.assertRaises(CapacityUnavailableError):
                     ctl.create_pod(GPU_BUILD_REQUEST, self_terminate_seconds=15_300)
-        for status in (401, 402, 422, 500):
-            with self.subTest(status=status):
-                ctl, _ = api(RestApiError("POST", status, "x"))
+        # A malformed request and a key that may not create Pods fail on the
+        # first candidate instead of sitting through every placement round.
+        failures = [(400, "invalid gpu id"), (403, NO_CAPACITY)]
+        failures += [(status, "x") for status in (401, 402, 403, 422, 500)]
+        for status, detail in failures:
+            with self.subTest(status=status, detail=detail):
+                ctl, _ = api(RestApiError("POST", status, detail))
                 with self.assertRaises(CommandError) as raised:
                     ctl.create_pod(GPU_BUILD_REQUEST, self_terminate_seconds=15_300)
                 self.assertNotIsInstance(raised.exception, CapacityUnavailableError)

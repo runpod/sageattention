@@ -58,13 +58,13 @@ def test_exact_build_matrix_matches_comfyui_base() -> None:
         "cp312-torch2.10.0-cu128": (
             "12.8", "2.10.0+cu128", "12.8",
             "2.2.0+torch2.10.0.cu128.sm90fix1",
-            "runpod/comfyui@sha256:ce5e842ca0c7233a983ff76a83739b445172259c77a43a117453ef7e6a64d0b7",
+            "runpod/comfyui@sha256:26cd753a3929eb7a59eb1f87ac483226e4cc9e61add40214a5dc21419c26f915",
             "runpod/sageattention-wheel-builder@sha256:304c806d607bedcd1c743344796ba4bd0f9fb4bd2cedeb5044d9b6446bbcdc06",
         ),
         "cp312-torch2.10.0-cu130": (
             "13.0", "2.10.0+cu130", "13.0",
             "2.2.0+torch2.10.0.cu130.sm90fix1",
-            "runpod/comfyui@sha256:0bf75436da591e0f26d299af3741e07cb8ce8ce36566d1a7d8d78aae458e5d67",
+            "runpod/comfyui@sha256:631e0eb04550e675f3a148ed65ad4378e4d1ba248156a9941cb11884e3fa552c",
             "runpod/sageattention-wheel-builder@sha256:d80e828634a67c449e9e9663a4a29cb08aefff95ef4a9ce71d0313d336b92b42",
         ),
         "cp312-torch2.13.0-cu132": (

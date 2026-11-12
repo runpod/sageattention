@@ -239,6 +239,9 @@ DEFAULT_API_URL = "https://api.runpod.io/v2"
 # Cloudflare in front of the Runpod API rejects urllib's default
 # Python-urllib/x.y agent with 403 "error code: 1010".
 USER_AGENT = "runpod-sageattention-factory/1"
+# Never a real Pod id (ids are lowercase alphanumerics), so the write probe in
+# check_auth cannot touch anything.
+AUTH_PROBE_POD_ID = "sageattention-write-access-probe"
 Executor = Callable[..., subprocess.CompletedProcess[str]]
 HttpExecutor = Callable[
     [str, str, Mapping[str, object] | None, Mapping[str, str], float], object
@@ -262,28 +265,37 @@ class RestApiError(CommandError):
         self.detail = detail
 
 
+# Messages Runpod uses for "no host can take this right now".  REST v2 sends
+# them with HTTP 400, the same status as a malformed request, so the text is
+# the only thing that tells capacity apart from a request that can never work.
+_CAPACITY_MESSAGES = (
+    "there are no longer any instances available with the requested "
+    "specifications",
+    "there are no instances available with the requested specifications",
+    "this machine does not have the resources to deploy your pod. "
+    "please try a different machine",
+    "insufficient resources",
+    "no gpus available",
+    "not enough free gpus",
+)
+
+
 def _is_capacity_unavailable_error(error: CommandError) -> bool:
     """Classify a create failure as worth trying the next candidate.
 
-    REST v2 answers a GPU and data center combination it cannot place with
-    400, and a pool the account cannot use with 403; neither carries a
-    machine-readable capacity code.  A rule violation is deterministic, so when
-    every candidate fails the collected details point at the request instead.
+    Only a 400 whose message names missing capacity qualifies.  Any other 400
+    is a request the API will reject every time, and a 403 means the key or
+    account may not do this at all; retrying either only burns placement
+    rounds before failing with a misleading capacity message.
     """
 
     if isinstance(error, RestApiError):
-        return error.status in {400, 403}
-    normalized = " ".join(str(error).casefold().split())
-    return any(
-        message in normalized
-        for message in (
-            "there are no longer any instances available with the requested "
-            "specifications",
-            "there are no instances available with the requested specifications",
-            "this machine does not have the resources to deploy your pod. "
-            "please try a different machine",
-        )
-    )
+        if error.status != 400:
+            return False
+        normalized = " ".join(error.detail.casefold().split())
+    else:
+        normalized = " ".join(str(error).casefold().split())
+    return any(message in normalized for message in _CAPACITY_MESSAGES)
 
 
 def _http_json(
@@ -372,9 +384,40 @@ class RunpodApi:
         )
 
     def check_auth(self, *, timeout: float = 30) -> None:
-        """Fail before any create when the key cannot read Pods."""
+        """Fail before any create when the key cannot manage Pods.
+
+        Reading ``/pods`` only proves read access; a read-only key passes it
+        and then gets 403 on every create.  Stopping a Pod that does not exist
+        is a write the API must authorize first, and it changes nothing: an
+        authorized key gets 400 or 404, a read-only key 401 or 403.
+        """
 
         self._request("GET", "/pods?limit=1", timeout=timeout)
+        try:
+            self._request("POST", f"/pods/{AUTH_PROBE_POD_ID}/stop", timeout=timeout)
+        except RestApiError as exc:
+            if exc.status in {401, 403}:
+                raise CommandError(
+                    "RUNPOD_API_KEY can read Pods but not create or delete them "
+                    f"(HTTP {exc.status} on a write probe); use a key with "
+                    "read/write Pod access"
+                ) from exc
+            if exc.status not in {400, 404}:
+                raise
+            return
+        raise CommandError(
+            f"write probe unexpectedly stopped a Pod named {AUTH_PROBE_POD_ID!r}"
+        )
+
+    def list_pods(self, *, timeout: float = 60) -> list[dict[str, object]]:
+        """Every Pod on the account, as REST v2 returns them."""
+
+        payload = self._request("GET", "/pods", timeout=timeout)
+        if isinstance(payload, dict):
+            payload = payload.get("items", payload.get("pods"))
+        if not isinstance(payload, list):
+            raise CommandError("Runpod REST Pod list returned no list of Pods")
+        return [pod for pod in payload if isinstance(pod, dict)]
 
     def create_pod(
         self,

@@ -129,12 +129,18 @@ but is excluded from routine release defaults after observed assignment hangs.
 Fallback is deliberately narrow. The orchestrator makes up to five placement
 rounds (`--placement-rounds`, 1–10), waiting 300 seconds
 (`--placement-backoff-seconds`, 0–900) before each retry, and retries only
-when every create in the previous round was refused for capacity (REST v2
-`400` or `403`). CPU builds walk their ordered flavor list in each round the
+when every create in the previous round was refused for capacity: a REST v2
+`400` whose message says no host can take the Pod ("no longer any instances
+available", "Insufficient resources", ...). Any other `400` is a malformed
+request and a `403` a key or account that may not do this; both fail on the
+first candidate. CPU builds walk their ordered flavor list in each round the
 same way. Waiting costs nothing because no Pod exists yet, so each round
 starts the `--timeout-seconds` budget afresh; the GitHub job timeouts include
 the worst-case waits. A pre-upload assignment mismatch is deleted before the next candidate is tried
-and prevents another full round. Authentication, configuration, SSH, upload,
+and prevents another full round. Before any create, `check_auth` reads
+`/pods` and then stops a Pod id that cannot exist: an authorized key gets
+`400`/`404` and nothing changes, while a read-only key gets `401`/`403` and
+the job stops there instead of failing every create. Authentication, configuration, SSH, upload,
 build, and test failures are never treated as capacity and are not retried
 against another GPU. If deletion of a rejected Pod fails, fallback stops
 immediately instead of risking a second billed Pod.
@@ -194,7 +200,7 @@ release workflow.
 2. The two build variants run sequentially. Each starts a one-GPU Pod from its
    exact builder image using the ordered builder candidates, port 22, registry
    authentication when needed, at least 80 GB
-   container disk, and an absolute `--terminate-after` deadline. The checked-out
+   container disk, and the in-Pod self-delete watchdog. The checked-out
    repository is archived without Git metadata or links and uploaded below
    `/work` on that explicitly sized ephemeral container filesystem; compilation
    does not require a persistent/network volume.
@@ -304,25 +310,26 @@ release job from running.
 
 ## Pod lifetime and cleanup
 
-Every default GPU builder and validator Pod combines independent lifetime
-controls:
+Every builder and validator Pod combines independent lifetime controls:
 
 - the Python orchestrator shares one monotonic hard deadline across Pod
   creation, SSH readiness, upload, commands, and artifact download;
-- Pod creation includes an absolute RFC3339 `--terminate-after` datetime set to
-  the hard timeout plus cleanup grace; and
 - after a Pod id exists, deletion always runs from a `finally` path and is
-  retried three times.
+  retried three times;
+- builder Pods (GPU and CPU) pass `RUNPOD_SELF_TERMINATE_SECONDS` to the
+  builder entrypoint, which arms the in-Pod deletion watchdog; and
+- `.github/workflows/reap-pods.yml` runs `tools/reap_pods.py` hourly. It deletes
+  every `sage-build-*` / `sage-test-*` Pod whose GitHub run attempt (named in
+  the Pod) has completed or no longer exists, or has been running for more than
+  360 minutes, and never touches any other Pod. Manual runs default to a dry
+  run.
 
-A deletion failure is a workflow failure rather than a warning. The absolute
-platform deadline remains the final protection against runner loss,
-cancellation, an image-start failure, or a workflow-side network partition.
-
-The explicit CPU fallback has the same orchestrator deadline and mandatory
-`finally` deletion, but its REST provisioning path has no verified platform
-deadline. It therefore must pass `RUNPOD_SELF_TERMINATE_SECONDS` to the builder
-entrypoint, which arms the reviewed in-Pod deletion watchdog. That watchdog is
-specific to the fallback and is never a replacement for orchestrator cleanup.
+A deletion failure is a workflow failure rather than a warning. REST v2 has no
+platform-side termination deadline (`--terminate-after` never took effect), so
+the `finally` path dies with the runner: a SIGKILLed, cancelled or lost runner
+leaves its Pod billing. Validation Pods run the ComfyUI runtime image, which has
+no watchdog, so the reaper is their only backstop; for builders it is the second
+one. The worst case is a leaked Pod billing until the next hourly sweep.
 
 Cancellation handling must still verify deletion in the Runpod console. Never
 assume an in-Pod watchdog ran: it cannot arm before the builder entrypoint

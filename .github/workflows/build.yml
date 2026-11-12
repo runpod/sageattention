@@ -39,12 +39,12 @@ on:
       runtime_image_cu128:
         description: ComfyUI-compatible cu128 test image (immutable digest)
         required: true
-        default: "runpod/comfyui@sha256:ce5e842ca0c7233a983ff76a83739b445172259c77a43a117453ef7e6a64d0b7"
+        default: "runpod/comfyui@sha256:26cd753a3929eb7a59eb1f87ac483226e4cc9e61add40214a5dc21419c26f915"
         type: string
       runtime_image_cu130:
         description: ComfyUI-compatible cu130 test image (immutable digest)
         required: true
-        default: "runpod/comfyui@sha256:0bf75436da591e0f26d299af3741e07cb8ce8ce36566d1a7d8d78aae458e5d67"
+        default: "runpod/comfyui@sha256:631e0eb04550e675f3a148ed65ad4378e4d1ba248156a9941cb11884e3fa552c"
         type: string
       runtime_image_cu132:
         description: ComfyUI-compatible cu132 test image (immutable digest)
@@ -158,11 +158,11 @@ on:
         type: string
       runtime_image_cu128:
         required: false
-        default: "runpod/comfyui@sha256:ce5e842ca0c7233a983ff76a83739b445172259c77a43a117453ef7e6a64d0b7"
+        default: "runpod/comfyui@sha256:26cd753a3929eb7a59eb1f87ac483226e4cc9e61add40214a5dc21419c26f915"
         type: string
       runtime_image_cu130:
         required: false
-        default: "runpod/comfyui@sha256:0bf75436da591e0f26d299af3741e07cb8ce8ce36566d1a7d8d78aae458e5d67"
+        default: "runpod/comfyui@sha256:631e0eb04550e675f3a148ed65ad4378e4d1ba248156a9941cb11884e3fa552c"
         type: string
       runtime_image_cu132:
         required: false
