@@ -1,0 +1,14 @@
+name: env-spike
+on:
+  pull_request:
+  push:
+    branches: [env-spike]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: spike-prod
+    steps:
+      - run: |
+          echo "event=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "head_ref=${{ github.head_ref }}"
